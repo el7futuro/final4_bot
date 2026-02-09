@@ -9,7 +9,7 @@ from sqlalchemy import text
 
 from bot.database import init_db, engine, Base
 from models.user import User
-from models.team import Team
+
 from models.match import Match
 from models.card import Card, init_cards
 from models.bet import Bet

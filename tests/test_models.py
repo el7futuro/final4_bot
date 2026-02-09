@@ -6,7 +6,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bot.database import Base
 from models.user import User
-from models.team import Team
+
 from models.match import Match
 
 

@@ -53,7 +53,7 @@ async def init_db() -> None:
     try:
         # Импортируем модели для создания таблиц
         from models.user import User
-        from models.team import Team
+
         from models.match import Match
         from models.card import Card
         from models.bet import Bet

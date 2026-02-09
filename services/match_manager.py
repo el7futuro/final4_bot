@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 
 from models.user import User
-from models.team import Team
+
 from models.match import Match, MatchStatus, MatchType
 from models.bet import Bet, BetStatus
 from models.card import Card, CardInstance, CardDeck, CardType
@@ -21,7 +21,6 @@ from models.tournament import Tournament, TournamentMatch
 from core.game_engine import Final4GameEngine, BetType as EngineBetType, CardType as EngineCardType
 from core.bot_ai import Final4BotAI, BotDifficulty
 from core.match_calculator import MatchCalculator
-from services.redis_client import redis_client
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +44,7 @@ class MatchManager:
 
             # Получаем пользователя и команду
             user = await session.get(User, user_id)
-            team = await session.get(Team, user_id)
 
-            if not user or not team:
-                return None
 
             # Создаем матч
             match = Match(
@@ -57,9 +53,7 @@ class MatchManager:
                 status=MatchStatus.WAITING
             )
 
-            # Сохраняем данные команды
-            match.player1_team_data = team.to_dict()
-            match.player1_formation = team.formation
+
 
             session.add(match)
             await session.commit()
@@ -86,10 +80,7 @@ class MatchManager:
 
             # Получаем пользователя и команду
             user = await session.get(User, user_id)
-            team = await session.get(Team, user_id)
 
-            if not user or not team:
-                return None
 
             # Определяем сложность бота
             difficulty_map = {
@@ -107,9 +98,7 @@ class MatchManager:
                 bot_difficulty=bot_difficulty.value
             )
 
-            # Сохраняем данные команды игрока
-            match.player1_team_data = team.to_dict()
-            match.player1_formation = team.formation
+
 
             # Создаем команду для бота
             bot_team = self._create_bot_team(bot_difficulty)
@@ -140,12 +129,7 @@ class MatchManager:
             if not tournament or tournament.status != "in_progress":
                 return None
 
-            # Получаем команды игроков
-            team1 = await session.get(Team, player1_id)
-            team2 = await session.get(Team, player2_id)
 
-            if not team1 or not team2:
-                return None
 
             # Создаем матч
             match = Match(
@@ -155,14 +139,7 @@ class MatchManager:
                 status=MatchStatus.CREATED
             )
 
-            # Сохраняем данные команд
-            match.player1_team_data = team1.to_dict()
-            match.player1_formation = team1.formation
-            match.player2_team_data = team2.to_dict()
-            match.player2_formation = team2.formation
 
-            session.add(match)
-            await session.commit()
 
             # Создаем колоду карточек
             await self._create_card_deck_for_match(session, match.id)
@@ -248,17 +225,7 @@ class MatchManager:
                 if not match1 or not match2:
                     return
 
-                # Получаем команду соперника
-                opponent_team = await session.get(Team, opponent_id)
-                if not opponent_team:
-                    return
 
-                # Обновляем первый матч
-                match1.player2_id = opponent_id
-                match1.player2_team_data = opponent_team.to_dict()
-                match1.player2_formation = opponent_team.formation
-                match1.status = MatchStatus.CREATED
-                match1.current_player = match1.player1_id  # Первым ходит создатель
 
                 # Удаляем второй матч
                 await session.delete(match2)

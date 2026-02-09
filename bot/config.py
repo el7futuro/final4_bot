@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+BOT_TELEGRAM_ID = -1  # константа
 
 @dataclass
 class BotConfig:

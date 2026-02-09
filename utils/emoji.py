@@ -74,6 +74,8 @@ EMOJI = {
     'player': '👤',
     'defense': '🛡️',
     'card': '📋',
+    'dice': '🎲',
+    'bet': '🎯',
     # Навигация
     'home': '🏠',
     'list': '📋',

@@ -5,12 +5,13 @@
 
 from aiogram import Router, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from aiogram.fsm.context import FSMContext
-from sqlalchemy import select, func
-
+from sqlalchemy import select, func, text
+from aiogram.fsm.context import FSMContext
+from utils.db_helpers import get_user_with_team, get_user_by_telegram_id
 from models.user import User
-from models.team import Team
+
 from bot.database import AsyncSessionLocal
 from utils.emoji import EMOJI
 
@@ -62,48 +63,25 @@ async def command_start(message: Message, state: FSMContext):
             # Существующий пользователь
             user.last_active = func.now()
             await session.commit()
+            welcome_text = f"""{EMOJI['welcome']} С возвращением, {first_name}!
 
-            # Проверяем есть ли команда
-            # Получаем team по id пользователя в БД
-            if user:
-                team = await session.get(Team, user.id)
-            else:
-                team = None
+            {EMOJI['stats']} <b>Ваша статистика:</b>
+            • Игр сыграно: {user.games_played}
+            • Побед: {user.games_won}
+            • Процент побед: {user.win_rate:.1f}%
 
-            if not team:
-                welcome_text = f"""{EMOJI['welcome']} С возвращением, {first_name}!
+            {EMOJI['play']} <b>Что хотите сделать?</b>
 
-У вас ещё нет команды. Для игры нужно создать команду из 16 футболистов.
-
-{EMOJI['rules']} <b>Состав команды:</b>
-• 1 вратарь (GK)
-• 5 защитников (DF)
-• 6 полузащитников (MF)
-• 4 нападающих (FW)
-
-Используйте команду /team для создания команды."""
-            else:
-                welcome_text = f"""{EMOJI['welcome']} С возвращением, {first_name}!
-
-{EMOJI['stats']} <b>Ваша статистика:</b>
-🏆 Рейтинг: {user.rating}
-
-🎮 Сыграно матчей: {user.games_played}
-✅ Побед: {user.games_won} ({user.win_rate:.1f}%)
-
-{EMOJI['team']} <b>Команда:</b> {team.name}
-{EMOJI['formation']} <b>Схема:</b> {team.formation}
-
-{EMOJI['play']} Что будем делать?"""
+            Используйте команды:
+            /play - Начать новую игру
+            /matches - Мои матчи
+            /help - Правила игры"""
 
     # Создаем клавиатуру
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
-                    text=f"{EMOJI['team']} Моя команда",
-                    callback_data="show_team"
-                ),
+
                 InlineKeyboardButton(
                     text=f"{EMOJI['play']} Играть",
                     callback_data="play_game"
@@ -236,11 +214,8 @@ async def command_profile(message: Message):
     user_id = message.from_user.id
 
     async with AsyncSessionLocal() as session:
-        # Получаем пользователя по telegram_id
-        result = await session.execute(
-            select(User).where(User.telegram_id == user_id)
-        )
-        user = result.scalar_one_or_none()
+        # ✅ ИСПРАВЛЕНО: используем хелпер
+        user, _ = await get_user_with_team(session, user_id)
 
         if not user:
             await message.answer("Сначала зарегистрируйтесь через /start")
@@ -251,7 +226,6 @@ async def command_profile(message: Message):
 {EMOJI['user']} <b>Игрок:</b> {user.first_name or 'Аноним'}
 {EMOJI['id']} <b>ID:</b> {user.telegram_id}
 {EMOJI['rating']} <b>Рейтинг ELO:</b> {user.rating}
-
 
 {EMOJI['stats']} <b>Статистика:</b>
 🎮 Сыграно: {user.games_played}
@@ -264,10 +238,7 @@ async def command_profile(message: Message):
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['team']} Моя команда",
-                        callback_data="show_team"
-                    ),
+
                     InlineKeyboardButton(
                         text=f"{EMOJI['play']} Играть",
                         callback_data="play_game"
@@ -279,223 +250,16 @@ async def command_profile(message: Message):
         await message.answer(profile_text, reply_markup=keyboard, parse_mode='HTML')
 
 
-@router.callback_query(F.data == "show_team")
-async def show_team_callback(callback_query):
-    """Обработчик кнопки 'Моя команда'"""
-    await callback_query.answer()
-    await command_team(callback_query.message)
 
 
-@router.message(Command("team"))
-async def command_team(message: Message):
-    """Обработчик команды /team"""
-    user_id = message.from_user.id
-
-    async with AsyncSessionLocal() as session:
-        # Получаем пользователя по telegram_id
-        result = await session.execute(
-            select(User).where(User.telegram_id == user_id)
-        )
-        user = result.scalar_one_or_none()
-
-        if not user:
-            await message.answer("Сначала зарегистрируйтесь через /start")
-            return
-
-        # Получаем team по id пользователя в БД
-        if user:
-            team = await session.get(Team, user.id)
-        else:
-            team = None
-
-        if not team:
-            # Команда не создана
-            text = f"""{EMOJI['team']} <b>Создание команды</b>
-
-У вас ещё нет команды. Для игры нужно создать команду из 16 футболистов.
-
-{EMOJI['rules']} <b>Требования к команде:</b>
-• 1 вратарь (GK)
-• 5 защитников (DF)
-• 6 полузащитников (MF)
-• 4 нападающих (FW)
-
-Всего должно быть 16 игроков."""
-
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text=f"{EMOJI['add']} Создать команду",
-                            callback_data="create_team"
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text=f"{EMOJI['help']} Как играть?",
-                            callback_data="show_help"
-                        )
-                    ]
-                ]
-            )
-        else:
-            # Показываем существующую команду
-            counts = team.get_player_count()
-            validation_result, validation_message = team.validate_team()
-
-            text = f"""{EMOJI['team']} <b>Моя команда: {team.name}</b>
-
-{EMOJI['gk']} Вратари: {counts['GK']}/1
-{EMOJI['df']} Защитники: {counts['DF']}/5
-{EMOJI['mf']} Полузащитники: {counts['MF']}/6
-{EMOJI['fw']} Нападающие: {counts['FW']}/4
-
-{EMOJI['formation']} <b>Текущая схема:</b> {team.formation}
-
-{EMOJI['info']} Всего игроков: {sum(counts.values())}/16
-{EMOJI['check']} {validation_message}"""
-
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text=f"{EMOJI['list']} Список игроков",
-                            callback_data="list_players"
-                        ),
-                        InlineKeyboardButton(
-                            text=f"{EMOJI['formation']} Сменить схему",
-                            callback_data="change_formation"
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text=f"{EMOJI['play']} Играть с этой командой",
-                            callback_data="play_game"
-                        )
-                    ]
-                ]
-            )
-
-        await message.answer(text, reply_markup=keyboard, parse_mode='HTML')
 
 
-@router.callback_query(F.data == "create_team")
-async def create_team_callback(callback_query):
-    telegram_id  = callback_query.from_user.id
 
-    async with AsyncSessionLocal() as session:
-        # Получаем пользователя по telegram_id
-        from sqlalchemy import select  # убедитесь что импорт есть
-        result = await session.execute(
-            select(User).where(User.telegram_id == telegram_id )
-        )
-        user = result.scalar_one_or_none()
 
-        if not user:
-            await callback_query.answer("Ошибка: пользователь не найден")
-            return
 
-        # Проверяем, нет ли уже команды (по user.id, а не user_id!)
-        existing_team = await session.get(Team, user.id)  # user.id - это id в БД
-        # Получаем team по id пользователя в БД
-        if user:
-            team = await session.get(Team, user.id)
-        else:
-            team = None
-        if existing_team:
-            await callback_query.answer("У вас уже есть команда!")
-            return
 
-        # Создаём команду автоматически
-        players = []
 
-        # Вратарь
-        players.append({
-            'id': 1,
-            'position': 'GK',
-            'name': 'Вратарь',
-            'number': 1,
-            'skill': {'reflex': 80, 'positioning': 75, 'handling': 78}
-        })
 
-        # Защитники (5)
-        for i in range(5):
-            players.append({
-                'id': 2 + i,
-                'position': 'DF',
-                'name': f'Защитник {i + 1}',
-                'number': 2 + i,
-                'skill': {'tackle': 75 + i * 2, 'positioning': 72 + i, 'speed': 70 - i}
-            })
-
-        # Полузащитники (6)
-        for i in range(6):
-            players.append({
-                'id': 7 + i,
-                'position': 'MF',
-                'name': f'Полузащитник {i + 1}',
-                'number': 7 + i,
-                'skill': {'passing': 78 + i * 2, 'dribble': 75 + i, 'stamina': 80 - i}
-            })
-
-        # Нападающие (4)
-        for i in range(4):
-            players.append({
-                'id': 13 + i,
-                'position': 'FW',
-                'name': f'Нападающий {i + 1}',
-                'number': 13 + i,
-                'skill': {'finishing': 82 + i * 3, 'pace': 80 + i, 'heading': 75 - i}
-            })
-
-        team = Team(
-            user_id=user.id,  # ✅ ПРАВИЛЬНО: id пользователя в БД
-            name=f"Команда {user.first_name or 'Игрока'}",
-            players=players
-        )
-        session.add(team)
-        await session.commit()
-
-        await callback_query.answer("✅ Команда создана автоматически!")
-
-        # Обновляем сообщение
-        counts = team.get_player_count()
-        validation_result, validation_message = team.validate_team()
-
-        text = f"""{EMOJI['team']} <b>Моя команда: {team.name}</b>
-
-{EMOJI['gk']} Вратари: {counts['GK']}/1
-{EMOJI['df']} Защитники: {counts['DF']}/5
-{EMOJI['mf']} Полузащитники: {counts['MF']}/6
-{EMOJI['fw']} Нападающие: {counts['FW']}/4
-
-{EMOJI['formation']} <b>Текущая схема:</b> {team.formation}
-
-{EMOJI['info']} Всего игроков: {sum(counts.values())}/16
-{EMOJI['check']} {validation_message}"""
-
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['list']} Список игроков",
-                        callback_data="list_players"
-                    ),
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['formation']} Сменить схему",
-                        callback_data="change_formation"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['play']} Играть с этой командой",
-                        callback_data="play_game"
-                    )
-                ]
-            ]
-        )
-
-        await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
 
 
 @router.callback_query(F.data == "list_players")
@@ -513,152 +277,14 @@ async def list_players_callback(callback_query):
             await callback_query.answer("Пользователь не найден")
             return
 
-        # Теперь получаем команду по user.id
-        team = await session.get(Team, user.id)
-
-        if not team:
-            await callback_query.answer("У вас нет команды")
-            return
-
-        players_by_position = {
-            'GK': [],
-            'DF': [],
-            'MF': [],
-            'FW': []
-        }
-
-        for player in team.players:
-            players_by_position[player['position']].append(player)
-
-        text = f"{EMOJI['list']} <b>Состав команды «{team.name}»:</b>\n\n"
-
-        # Вратари
-        text += f"{EMOJI['gk']} <b>Вратари:</b>\n"
-        for player in players_by_position['GK']:
-            text += f"#{player['number']} {player['name']}\n"
-
-        # Защитники
-        text += f"\n{EMOJI['df']} <b>Защитники:</b>\n"
-        for player in players_by_position['DF']:
-            text += f"#{player['number']} {player['name']}\n"
-
-        # Полузащитники
-        text += f"\n{EMOJI['mf']} <b>Полузащитники:</b>\n"
-        for player in players_by_position['MF']:
-            text += f"#{player['number']} {player['name']}\n"
-
-        # Нападающие
-        text += f"\n{EMOJI['fw']} <b>Нападающие:</b>\n"
-        for player in players_by_position['FW']:
-            text += f"#{player['number']} {player['name']}\n"
-
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['back']} Назад к команде",
-                        callback_data="show_team"
-                    )
-                ]
-            ]
-        )
-
-        await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
-    await callback_query.answer()
 
 
-@router.callback_query(F.data == "change_formation")
-async def change_formation_callback(callback_query):
-    """Смена формации команды"""
-    user_id = callback_query.from_user.id
-
-    async with AsyncSessionLocal() as session:
-        # Сначала получаем пользователя
-        result = await session.execute(
-            select(User).where(User.telegram_id == user_id)
-        )
-        user = result.scalar_one_or_none()
-
-        if not user:
-            await callback_query.answer("Пользователь не найден")
-            return
-
-        # Теперь получаем команду по user.id
-        team = await session.get(Team, user.id)
-
-        if not team:
-            await callback_query.answer("У вас нет команды")
-            return
-
-        possible_formations = team.get_possible_formations()
-
-        text = f"""{EMOJI['formation']} <b>Выбор формации</b>
-
-Текущая формация: {team.formation}
-
-{EMOJI['rules']} <b>Допустимые формации:</b>"""
-
-        for formation in possible_formations:
-            text += f"\n• {formation}"
-
-        text += f"\n\n{EMOJI['info']} Выберите новую формацию:"
-
-        # Создаем кнопки для формаций
-        keyboard_buttons = []
-        for formation in possible_formations:
-            keyboard_buttons.append([
-                InlineKeyboardButton(
-                    text=f"{formation}",
-                    callback_data=f"set_formation_{formation}"
-                )
-            ])
-
-        # Добавляем кнопку "Назад"
-        keyboard_buttons.append([
-            InlineKeyboardButton(
-                text=f"{EMOJI['back']} Назад",
-                callback_data="show_team"
-            )
-        ])
-
-        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-
-        await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
-    await callback_query.answer()
 
 
-@router.callback_query(F.data.startswith("set_formation_"))
-async def set_formation_callback(callback_query):
-    """Установка выбранной формации"""
-    formation = callback_query.data.replace("set_formation_", "")
-    user_id = callback_query.from_user.id
 
-    async with AsyncSessionLocal() as session:
-        # Сначала получаем пользователя
-        result = await session.execute(
-            select(User).where(User.telegram_id == user_id)
-        )
-        user = result.scalar_one_or_none()
 
-        if not user:
-            await callback_query.answer("Пользователь не найден")
-            return
 
-        # Теперь получаем команду по user.id
-        team = await session.get(Team, user.id)
 
-        if not team:
-            await callback_query.answer("Ошибка: команда не найдена")
-            return
-
-        if team.set_formation(formation):
-            await session.commit()
-            await callback_query.answer(f"✅ Формация изменена на {formation}")
-
-            # Возвращаем к информации о команде
-            await show_team_callback(callback_query)
-        else:
-            await callback_query.answer("❌ Неверная формация")
 
 
 @router.callback_query(F.data == "show_profile")
@@ -802,28 +428,8 @@ async def play_game_callback(callback_query):
             await callback_query.answer("Сначала зарегистрируйтесь")
             return
 
-        # Получаем team по id пользователя в БД
-        if user:
-            team = await session.get(Team, user.id)
-        else:
-            team = None
+        text = f"{EMOJI['play']} <b>Выберите тип игры:</b>"
 
-        if not team:
-            await callback_query.answer("Сначала создайте команду")
-            return
-
-        # Проверяем валидность команды
-        is_valid, message = team.validate_team()
-        if not is_valid:
-            await callback_query.answer(f"Команда не готова: {message}")
-            return
-
-        text = f"""{EMOJI['play']} <b>Найти матч</b>
-
-Ваша команда: {team.name}
-Формация: {team.formation}
-
-Выберите тип матча:"""
 
         from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -832,13 +438,13 @@ async def play_game_callback(callback_query):
                 [
                     InlineKeyboardButton(
                         text=f"{EMOJI['vs']} Против случайного соперника",
-                        callback_data="match_vs_random"
+                        callback_data="match_type_vs_random"
                     )
                 ],
                 [
                     InlineKeyboardButton(
                         text=f"{EMOJI['bot']} Против бота",
-                        callback_data="match_vs_bot"
+                        callback_data="match_type_vs_bot"
                     )
                 ],
                 [
@@ -862,7 +468,8 @@ async def play_game_callback(callback_query):
 
 
 @router.callback_query(F.data == "main_menu")
-async def main_menu_callback(callback_query):
+async def main_menu_callback(callback_query: CallbackQuery, state: FSMContext):
     """Возврат в главное меню"""
     await callback_query.answer()
-    await command_start(callback_query.message, callback_query.bot)
+    # ✅ Передаем state вместо bot
+    await command_start(callback_query.message, state)

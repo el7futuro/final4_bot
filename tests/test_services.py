@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from services.match_manager import MatchManager
 from models.match import Match, MatchStatus, MatchType
 from models.user import User
-from models.team import Team
+
 
 
 class TestMatchManager:

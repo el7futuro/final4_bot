@@ -36,7 +36,7 @@ async def test_bot():
         # 3. Проверка моделей
         try:
             from models.user import User
-            from models.team import Team
+
             from models.match import Match
             print("✅ Модели загружены")
         except Exception as e:

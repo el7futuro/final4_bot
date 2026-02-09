@@ -6,7 +6,7 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from typing import List, Dict, Optional, Tuple
 from models.match import Match, MatchStatus
-from models.team import Team
+
 from utils.emoji import EMOJI
 
 

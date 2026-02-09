@@ -8,7 +8,7 @@ from sqlalchemy import select
 import logging
 
 from models.user import User
-from models.team import Team
+
 from bot.database import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)

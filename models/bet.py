@@ -11,10 +11,9 @@ from models.base import Base
 
 class BetType(enum.Enum):
     """Типы ставок в Final 4"""
-    ODD_EVEN = "odd_even"  # Чет/нечет
-    LESS_MORE = "less_more"  # 1-3 (Меньше) / 4-6 (Больше)
-    EXACT_NUMBER = "exact"  # Точное число
-
+    EVEN_ODD = "even_odd"  # Чет/нечет
+    BIG_SMALL = "big_small"  # 1-3 (Меньше) / 4-6 (Больше)
+    GOAL = "goal"  # Точное число
 
 class BetStatus(enum.Enum):
     """Статусы ставки"""
@@ -95,15 +94,16 @@ class Bet(Base):
         if not self.dice_roll:
             return False
 
-        if self.bet_type == BetType.ODD_EVEN:
+        if self.bet_type == BetType.EVEN_ODD:  # ← ИЗМЕНЕНО
             is_even = self.dice_roll % 2 == 0
             return (self.bet_value == "чет" and is_even) or (self.bet_value == "нечет" and not is_even)
 
-        elif self.bet_type == BetType.LESS_MORE:
+        elif self.bet_type == BetType.BIG_SMALL:  # ← ИЗМЕНЕНО
             is_less = self.dice_roll <= 3
-            return (self.bet_value == "меньше" and is_less) or (self.bet_value == "больше" and not is_less)
+            return (self.bet_value == "больше" and not is_less) or (
+                        self.bet_value == "меньше" and is_less)  # ← Исправлены значения
 
-        elif self.bet_type == BetType.EXACT_NUMBER:
+        elif self.bet_type == BetType.GOAL:  # ← ИЗМЕНЕНО
             return str(self.dice_roll) == self.bet_value
 
         return False
@@ -118,32 +118,32 @@ class Bet(Base):
         # Согласно правилам игры:
         # Вратарь: только ставка на Чет/Нечет → 3 отбития
         if self.player_position == 'GK':
-            if self.bet_type == BetType.ODD_EVEN:
+            if self.bet_type == BetType.EVEN_ODD:  # ← ИЗМЕНЕНО
                 actions['defenses'] = 3
 
         # Защитник
         elif self.player_position == 'DF':
-            if self.bet_type == BetType.ODD_EVEN:
+            if self.bet_type == BetType.EVEN_ODD:  # ← ИЗМЕНЕНО
                 actions['defenses'] = 2
-            elif self.bet_type == BetType.LESS_MORE:
+            elif self.bet_type == BetType.BIG_SMALL:  # ← ИЗМЕНЕНО
                 actions['passes'] = 1
-            elif self.bet_type == BetType.EXACT_NUMBER:
+            elif self.bet_type == BetType.GOAL:  # ← ИЗМЕНЕНО
                 actions['goals'] = 1
 
         # Полузащитник
         elif self.player_position == 'MF':
-            if self.bet_type == BetType.ODD_EVEN:
+            if self.bet_type == BetType.EVEN_ODD:  # ← ИЗМЕНЕНО
                 actions['defenses'] = 1
-            elif self.bet_type == BetType.LESS_MORE:
+            elif self.bet_type == BetType.BIG_SMALL:  # ← ИЗМЕНЕНО
                 actions['passes'] = 2
-            elif self.bet_type == BetType.EXACT_NUMBER:
+            elif self.bet_type == BetType.GOAL:  # ← ИЗМЕНЕНО
                 actions['goals'] = 1
 
         # Нападающий
         elif self.player_position == 'FW':
-            if self.bet_type == BetType.LESS_MORE:
+            if self.bet_type == BetType.BIG_SMALL:  # ← ИЗМЕНЕНО
                 actions['passes'] = 1
-            elif self.bet_type == BetType.EXACT_NUMBER:
+            elif self.bet_type == BetType.GOAL:  # ← ИЗМЕНЕНО
                 actions['goals'] = 1
 
         return actions

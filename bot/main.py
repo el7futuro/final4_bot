@@ -1,6 +1,10 @@
 # bot/main.py
 import asyncio
 import logging
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage  # ИЗМЕНИЛИ
 from bot.config import load_config
