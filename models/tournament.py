@@ -1,204 +1,248 @@
 # models/tournament.py
 """
-Модель турниров для Final 4.
+Модели турниров для Final 4.
+
+Содержит:
+- TournamentStatus     — статусы турнира
+- TournamentType       — форматы проведения (single/double/swiss/round-robin)
+- TournamentFormat     — размер сетки (4/8/16 участников)
+- Tournament           — основная модель турнира (настройки, участники, сетка, призы)
+- TournamentMatch      — отдельный матч внутри турнира (ссылка на Match + позиция в сетке)
 """
 
-from sqlalchemy import Column, Integer, String, JSON, DateTime, func, ForeignKey, Enum, Boolean, Float, Text
-from sqlalchemy.orm import relationship
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Dict, List, Optional, Any
+
 import enum
+from sqlalchemy import (
+    Column, Integer, String, JSON, DateTime, func,
+    ForeignKey, Enum, Boolean, Text
+)
+from sqlalchemy.orm import relationship
+
 from models.base import Base
 
 
 class TournamentStatus(enum.Enum):
-    """Статусы турнира"""
-    REGISTRATION = "registration"  # Регистрация участников
-    CHECKIN = "checkin"  # Подтверждение участников
-    IN_PROGRESS = "in_progress"  # Идет
-    FINISHED = "finished"  # Завершен
-    CANCELLED = "cancelled"  # Отменен
+    """
+    Текущий статус турнира.
+    """
+    REGISTRATION = "registration"   # идёт набор участников
+    CHECKIN      = "checkin"        # подтверждение присутствия (чек-ин)
+    IN_PROGRESS  = "in_progress"    # турнир идёт
+    FINISHED     = "finished"       # завершён
+    CANCELLED    = "cancelled"      # отменён
 
 
 class TournamentType(enum.Enum):
-    """Типы турниров"""
-    SINGLE_ELIMINATION = "single"  # Олимпийская система (проиграл - вылетел)
-    DOUBLE_ELIMINATION = "double"  # Двойная система выбывания
-    SWISS = "swiss"  # Швейцарская система
-    ROUND_ROBIN = "round_robin"  # Круговая система
+    """
+    Формат проведения турнира.
+    """
+    SINGLE_ELIMINATION = "single"       # одиночное выбывание
+    DOUBLE_ELIMINATION = "double"       # двойное выбывание
+    SWISS              = "swiss"        # швейцарская система
+    ROUND_ROBIN        = "round_robin"  # круговая система
 
 
 class TournamentFormat(enum.Enum):
-    """Форматы турнира"""
-    PLAYOFF_4 = "playoff_4"  # 4 участника
-    PLAYOFF_8 = "playoff_8"  # 8 участников
+    """
+    Размер турнирной сетки (влияет на количество участников и раундов).
+    """
+    PLAYOFF_4  = "playoff_4"   # 4 участника
+    PLAYOFF_8  = "playoff_8"   # 8 участников
     PLAYOFF_16 = "playoff_16"  # 16 участников
 
 
 class Tournament(Base):
-    __tablename__ = 'tournaments'
+    """
+    Основная модель турнира.
+
+    Хранит:
+    - название, описание, тип, формат, статус
+    - настройки (взнос, призовой фонд, рейтинг-фильтры)
+    - расписание регистрации и проведения
+    - распределение призов (в процентах)
+    - структура сетки (bracket)
+    - список участников и лист ожидания
+    - результаты (победитель, места, финальная таблица)
+    """
+
+    __tablename__ = "tournaments"
 
     id = Column(Integer, primary_key=True)
 
     # Основная информация
-    name = Column(String(128), nullable=False)
-    description = Column(Text)
-    tournament_type = Column(Enum(TournamentType), nullable=False, default=TournamentType.SINGLE_ELIMINATION)
+    name             = Column(String(128), nullable=False)
+    description      = Column(Text, nullable=True)
+    tournament_type  = Column(Enum(TournamentType), nullable=False, default=TournamentType.SINGLE_ELIMINATION)
     tournament_format = Column(Enum(TournamentFormat), nullable=False, default=TournamentFormat.PLAYOFF_8)
-    status = Column(Enum(TournamentStatus), nullable=False, default=TournamentStatus.REGISTRATION)
+    status           = Column(Enum(TournamentStatus), nullable=False, default=TournamentStatus.REGISTRATION)
 
-    # Настройки
-    max_players = Column(Integer, nullable=False)  # Максимальное количество участников
-    entry_fee = Column(Integer, default=0)  # Взнос за участие
-    prize_pool = Column(Integer, default=0)  # Призовой фонд
-    min_rating = Column(Integer, default=0)  # Минимальный рейтинг для участия
-    max_rating = Column(Integer, default=9999)  # Максимальный рейтинг для участия
+    # Настройки участия
+    max_players   = Column(Integer, nullable=False)
+    entry_fee     = Column(Integer, default=0)          # взнос в очках/валюте
+    prize_pool    = Column(Integer, default=0)          # общий призовой фонд
+    min_rating    = Column(Integer, default=0)
+    max_rating    = Column(Integer, default=9999)
 
     # Расписание
     registration_start = Column(DateTime(timezone=True), nullable=False)
-    registration_end = Column(DateTime(timezone=True), nullable=False)
-    tournament_start = Column(DateTime(timezone=True), nullable=False)
-    estimated_end = Column(DateTime(timezone=True))
+    registration_end   = Column(DateTime(timezone=True), nullable=False)
+    tournament_start   = Column(DateTime(timezone=True), nullable=False)
+    estimated_end      = Column(DateTime(timezone=True), nullable=True)
 
-    # Призовые места (в процентах от призового фонда)
+    # Распределение призов (место → процент от prize_pool)
     prize_distribution = Column(JSON, default={
-        '1': 50.0,  # 1 место - 50%
-        '2': 30.0,  # 2 место - 30%
-        '3': 20.0  # 3 место - 20%
+        "1": 50.0,
+        "2": 30.0,
+        "3": 20.0
     })
 
     # Сетка турнира
-    bracket = Column(JSON, default=dict)  # Структура сетки
-    current_round = Column(Integer, default=1)  # Текущий раунд
+    bracket       = Column(JSON, default=dict)      # полная структура сетки
+    current_round = Column(Integer, default=1)
 
     # Участники
-    participants = Column(JSON, default=list)  # Список участников [{'user_id': X, 'checked_in': bool}]
-    waiting_list = Column(JSON, default=list)  # Лист ожидания
+    participants  = Column(JSON, default=list)      # [{'user_id': int, 'checked_in': bool, 'seed': int?}]
+    waiting_list  = Column(JSON, default=list)      # лист ожидания
 
     # Результаты
-    winner_id = Column(Integer, ForeignKey('users.id'))
-    second_place_id = Column(Integer, ForeignKey('users.id'))
-    third_place_id = Column(Integer, ForeignKey('users.id'))
-    final_standings = Column(JSON, default=list)  # Финальные места
+    winner_id       = Column(Integer, ForeignKey("users.id"), nullable=True)
+    second_place_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    third_place_id  = Column(Integer, ForeignKey("users.id"), nullable=True)
+    final_standings = Column(JSON, default=list)    # финальная таблица мест
 
-    # Создатель турнира
-    created_by = Column(Integer, ForeignKey('users.id'), nullable=False)
+    # Организатор
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
 
-    # Время
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-    started_at = Column(DateTime(timezone=True))
-    finished_at = Column(DateTime(timezone=True))
+    # Временные метки
+    created_at  = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at  = Column(DateTime(timezone=True), onupdate=func.now())
+    started_at  = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
 
-    # Связи
-    creator = relationship("User", foreign_keys=[created_by])
-    winner = relationship("User", foreign_keys=[winner_id])
-    second_place = relationship("User", foreign_keys=[second_place_id])
-    third_place = relationship("User", foreign_keys=[third_place_id])
-    tournament_matches = relationship("TournamentMatch", back_populates="tournament", cascade="all, delete-orphan")
+    # Отношения
+    creator       = relationship("User", foreign_keys=[created_by], back_populates="tournaments_created")
+    winner        = relationship("User", foreign_keys=[winner_id])
+    second_place  = relationship("User", foreign_keys=[second_place_id])
+    third_place   = relationship("User", foreign_keys=[third_place_id])
+    tournament_matches = relationship(
+        "TournamentMatch",
+        back_populates="tournament",
+        cascade="all, delete-orphan"
+    )
 
-    def __repr__(self):
-        return f"<Tournament(id={self.id}, name='{self.name}', status={self.status.value})>"
+    def __repr__(self) -> str:
+        return f"<Tournament id={self.id} '{self.name}' {self.status.value}>"
 
-    def to_dict(self) -> dict:
-        """Сериализация в словарь"""
+    def to_dict(self) -> Dict[str, Any]:
+        """Краткая сериализация для API / уведомлений."""
         return {
-            'id': self.id,
-            'name': self.name,
-            'type': self.tournament_type.value,
-            'format': self.tournament_format.value,
-            'status': self.status.value,
-            'max_players': self.max_players,
-            'current_players': len(self.participants),
-            'entry_fee': self.entry_fee,
-            'prize_pool': self.prize_pool,
-            'current_round': self.current_round,
-            'created_by': self.created_by,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-            'registration_end': self.registration_end.isoformat() if self.registration_end else None,
-            'tournament_start': self.tournament_start.isoformat() if self.tournament_start else None
+            "id": self.id,
+            "name": self.name,
+            "type": self.tournament_type.value,
+            "format": self.tournament_format.value,
+            "status": self.status.value,
+            "max_players": self.max_players,
+            "current_players": len(self.participants),
+            "entry_fee": self.entry_fee,
+            "prize_pool": self.prize_pool,
+            "current_round": self.current_round,
+            "created_by": self.created_by,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "registration_end": self.registration_end.isoformat() if self.registration_end else None,
+            "tournament_start": self.tournament_start.isoformat() if self.tournament_start else None,
         }
 
     def is_registration_open(self) -> bool:
-        """Открыта ли регистрация"""
-        from datetime import datetime
-        now = datetime.now(self.registration_start.tzinfo)
-        return (self.status == TournamentStatus.REGISTRATION and
-                self.registration_start <= now <= self.registration_end)
+        """Проверяет, открыта ли сейчас регистрация."""
+        from datetime import datetime as dt
+        now = dt.now(self.registration_start.tzinfo or dt.utcnow().tzinfo)
+        return (
+            self.status == TournamentStatus.REGISTRATION and
+            self.registration_start <= now <= self.registration_end
+        )
 
     def can_join(self, user_id: int, user_rating: int) -> tuple[bool, str]:
-        """Может ли пользователь присоединиться к турниру"""
-        # Проверяем, открыта ли регистрация
+        """
+        Может ли пользователь зарегистрироваться на турнир.
+
+        Возвращает: (можно, причина_если_нельзя)
+        """
         if not self.is_registration_open():
             return False, "Регистрация закрыта"
 
-        # Проверяем рейтинг
         if user_rating < self.min_rating:
             return False, f"Рейтинг слишком низкий (минимум {self.min_rating})"
+
         if user_rating > self.max_rating:
             return False, f"Рейтинг слишком высокий (максимум {self.max_rating})"
 
-        # Проверяем, есть ли уже место
         if len(self.participants) >= self.max_players:
-            # Проверяем лист ожидания
-            if any(p['user_id'] == user_id for p in self.waiting_list):
+            if any(p["user_id"] == user_id for p in self.waiting_list):
                 return False, "Вы уже в листе ожидания"
             return False, "Турнир заполнен"
 
-        # Проверяем, не зарегистрирован ли уже
-        if any(p['user_id'] == user_id for p in self.participants):
+        if any(p["user_id"] == user_id for p in self.participants):
             return False, "Вы уже зарегистрированы"
 
         return True, "Можно присоединиться"
 
-    def add_participant(self, user_id: int):
-        """Добавляет участника"""
-        if len(self.participants) < self.max_players:
-            self.participants.append({
-                'user_id': user_id,
-                'checked_in': False,
-                'join_date': func.now(),
-                'seed': len(self.participants) + 1  # Посев
-            })
-        else:
-            # Добавляем в лист ожидания
-            self.waiting_list.append({
-                'user_id': user_id,
-                'join_date': func.now(),
-                'position': len(self.waiting_list) + 1
-            })
+    def add_participant(self, user_id: int, seed: Optional[int] = None) -> bool:
+        """
+        Добавляет участника в список зарегистрированных.
 
-    def remove_participant(self, user_id: int):
-        """Удаляет участника"""
-        self.participants = [p for p in self.participants if p['user_id'] != user_id]
-        self.waiting_list = [p for p in self.waiting_list if p['user_id'] != user_id]
+        Возвращает True, если добавлен успешно.
+        """
+        if any(p["user_id"] == user_id for p in self.participants):
+            return False
 
-    def check_in_participant(self, user_id: int):
-        """Подтверждает участие"""
-        for participant in self.participants:
-            if participant['user_id'] == user_id:
-                participant['checked_in'] = True
-                break
-
-    def generate_bracket(self):
-        """Генерирует сетку турнира"""
-        if self.tournament_type != TournamentType.SINGLE_ELIMINATION:
-            # Для других типов нужна своя логика
-            return
-
-        checked_in = [p for p in self.participants if p['checked_in']]
-        num_players = len(checked_in)
-
-        # Определяем ближайшую степень двойки
-        import math
-        bracket_size = 2 ** math.ceil(math.log2(num_players)) if num_players > 0 else 0
-
-        # Создаем пустую сетку
-        bracket = {
-            'size': bracket_size,
-            'rounds': [],
-            'matches': {}
+        participant = {
+            "user_id": user_id,
+            "checked_in": False,
+            "seed": seed or 9999
         }
 
-        # Определяем количество раундов
+        self.participants.append(participant)
+        return True
+
+    def remove_participant(self, user_id: int) -> bool:
+        """Удаляет участника из списка (до начала турнира)."""
+        before = len(self.participants)
+        self.participants = [p for p in self.participants if p["user_id"] != user_id]
+        return len(self.participants) < before
+
+    def check_in_participant(self, user_id: int) -> bool:
+        """Подтверждает присутствие участника (чек-ин)."""
+        for p in self.participants:
+            if p["user_id"] == user_id:
+                p["checked_in"] = True
+                return True
+        return False
+
+    def initialize_bracket(self) -> None:
+        """
+        Создаёт пустую структуру сетки в зависимости от формата турнира.
+        Вызывается после завершения регистрации.
+        """
+        if self.tournament_format == TournamentFormat.PLAYOFF_4:
+            bracket_size = 4
+        elif self.tournament_format == TournamentFormat.PLAYOFF_8:
+            bracket_size = 8
+        elif self.tournament_format == TournamentFormat.PLAYOFF_16:
+            bracket_size = 16
+        else:
+            return
+
+        bracket = {
+            "size": bracket_size,
+            "rounds": [],
+            "matches": {}
+        }
+
+        import math
         num_rounds = int(math.log2(bracket_size)) if bracket_size > 0 else 0
 
         for round_num in range(1, num_rounds + 1):
@@ -209,153 +253,173 @@ class Tournament(Base):
                 match_id = f"{round_num}_{match_num}"
                 round_matches.append(match_id)
 
-                # Определяем следующий матч
                 next_round = round_num + 1
                 next_match_num = (match_num + 1) // 2
                 next_match_id = f"{next_round}_{next_match_num}" if next_round <= num_rounds else None
 
-                bracket['matches'][match_id] = {
-                    'round': round_num,
-                    'number': match_num,
-                    'player1': None,
-                    'player2': None,
-                    'winner': None,
-                    'next_match': next_match_id,
-                    'match_data': None  # ID реального матча
+                bracket["matches"][match_id] = {
+                    "round": round_num,
+                    "number": match_num,
+                    "player1": None,
+                    "player2": None,
+                    "winner": None,
+                    "next_match": next_match_id,
+                    "match_data": None  # будет ссылка на Match.id
                 }
 
-            bracket['rounds'].append({
-                'round': round_num,
-                'name': self._get_round_name(round_num, num_rounds),
-                'matches': round_matches
+            bracket["rounds"].append({
+                "round": round_num,
+                "name": self._get_round_name(round_num, num_rounds),
+                "matches": round_matches
             })
 
         self.bracket = bracket
 
     def _get_round_name(self, round_num: int, total_rounds: int) -> str:
-        """Возвращает название раунда"""
-        round_names = {
-            1: '1/8 финала',
-            2: '1/4 финала',
-            3: '1/2 финала',
-            4: 'Финал'
-        }
-
-        # Для сеток разного размера
-        if total_rounds == 2:  # 4 участника
-            names = {1: '1/2 финала', 2: 'Финал'}
-        elif total_rounds == 3:  # 8 участников
-            names = {1: '1/4 финала', 2: '1/2 финала', 3: 'Финал'}
-        elif total_rounds == 4:  # 16 участников
-            names = {1: '1/8 финала', 2: '1/4 финала', 3: '1/2 финала', 4: 'Финал'}
+        """Возвращает красивое название раунда в зависимости от размера сетки."""
+        if total_rounds == 2:   # 4 игрока
+            names = {1: "Полуфинал", 2: "Финал"}
+        elif total_rounds == 3: # 8 игроков
+            names = {1: "Четвертьфинал", 2: "Полуфинал", 3: "Финал"}
+        elif total_rounds == 4: # 16 игроков
+            names = {1: "1/8 финала", 2: "Четвертьфинал", 3: "Полуфинал", 4: "Финал"}
         else:
-            names = round_names
+            names = {
+                1: "1/8 финала",
+                2: "Четвертьфинал",
+                3: "Полуфинал",
+                4: "Финал"
+            }
 
         return names.get(round_num, f"Раунд {round_num}")
 
-    def seed_participants(self):
-        """Распределяет участников по сетке"""
+    def seed_participants(self) -> None:
+        """
+        Распределяет подтвердивших участие игроков по сетке (посев).
+        Вызывается после чек-ина.
+        """
         if not self.bracket:
             return
 
-        checked_in = [p for p in self.participants if p['checked_in']]
-        checked_in.sort(key=lambda x: x.get('seed', 999))
+        checked_in = [p for p in self.participants if p.get("checked_in")]
+        checked_in.sort(key=lambda x: x.get("seed", 9999))
 
-        # Для олимпийской системы используем стандартное распределение
-        bracket_size = self.bracket['size']
-        matches_first_round = bracket_size // 2
+        bracket_size = self.bracket["size"]
+        first_round_matches = bracket_size // 2
 
-        for i in range(matches_first_round):
+        for i in range(first_round_matches):
             match_id = f"1_{i + 1}"
 
-            if i * 2 < len(checked_in):
-                player1 = checked_in[i * 2]['user_id']
-            else:
-                player1 = None  # Автоматический проход
+            player1 = checked_in[i * 2]["user_id"] if i * 2 < len(checked_in) else None
+            player2 = checked_in[i * 2 + 1]["user_id"] if i * 2 + 1 < len(checked_in) else None
 
-            if i * 2 + 1 < len(checked_in):
-                player2 = checked_in[i * 2 + 1]['user_id']
-            else:
-                player2 = None  # Автоматический проход
-
-            self.bracket['matches'][match_id]['player1'] = player1
-            self.bracket['matches'][match_id]['player2'] = player2
+            self.bracket["matches"][match_id]["player1"] = player1
+            self.bracket["matches"][match_id]["player2"] = player2
 
 
 class TournamentMatch(Base):
-    __tablename__ = 'tournament_matches'
+    """
+    Связующая модель между турниром и конкретным матчем.
+
+    Хранит:
+    - позицию в турнирной сетке
+    - ссылку на реальный матч (Match)
+    - участников
+    - победителя
+    - статус завершения
+    """
+
+    __tablename__ = "tournament_matches"
 
     id = Column(Integer, primary_key=True)
 
-    # Связи
-    tournament_id = Column(Integer, ForeignKey('tournaments.id'), nullable=False)
-    match_id = Column(Integer, ForeignKey('matches.id'))  # Ссылка на реальный матч
+    tournament_id = Column(Integer, ForeignKey("tournaments.id"), nullable=False)
+    match_id      = Column(Integer, ForeignKey("matches.id"), nullable=True)
 
-    # Позиция в сетке
-    bracket_position = Column(String(32), nullable=False)  # "1_1", "1_2", "2_1", etc.
-    round_number = Column(Integer, nullable=False)
-    match_number = Column(Integer, nullable=False)
+    # Позиция в сетке турнира
+    bracket_position = Column(String(32), nullable=False)   # пример: "1_1", "2_3", "3_1"
+    round_number     = Column(Integer, nullable=False)
+    match_number     = Column(Integer, nullable=False)
 
-    # Участники
-    player1_id = Column(Integer, ForeignKey('users.id'))
-    player2_id = Column(Integer, ForeignKey('users.id'))
+    # Участники матча
+    player1_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    player2_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
     # Результат
-    winner_id = Column(Integer, ForeignKey('users.id'))
-    is_walkover = Column(Boolean, default=False)  # Техническая победа
-    walkover_reason = Column(String(128))
+    winner_id    = Column(Integer, ForeignKey("users.id"), nullable=True)
+    is_walkover  = Column(Boolean, default=False)
+    walkover_reason = Column(String(128), nullable=True)
 
-    # Следующий матч в сетке
-    next_match_id = Column(Integer, ForeignKey('tournament_matches.id'))
+    # Связь с следующим матчем
+    next_match_id = Column(Integer, ForeignKey("tournament_matches.id"), nullable=True)
 
     # Статус
     is_completed = Column(Boolean, default=False)
 
-    # Время
-    scheduled_time = Column(DateTime(timezone=True))
-    started_at = Column(DateTime(timezone=True))
-    completed_at = Column(DateTime(timezone=True))
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    # Временные метки
+    scheduled_time = Column(DateTime(timezone=True), nullable=True)
+    started_at     = Column(DateTime(timezone=True), nullable=True)
+    completed_at   = Column(DateTime(timezone=True), nullable=True)
+    created_at     = Column(DateTime(timezone=True), server_default=func.now())
 
-    # Связи
+    # Отношения
     tournament = relationship("Tournament", back_populates="tournament_matches")
-    match = relationship("Match")
-    player1 = relationship("User", foreign_keys=[player1_id])
-    player2 = relationship("User", foreign_keys=[player2_id])
-    winner = relationship("User", foreign_keys=[winner_id])
-    next_match = relationship("TournamentMatch", remote_side=[id], foreign_keys=[next_match_id],
-                              back_populates="previous_matches")
-    previous_matches = relationship("TournamentMatch", back_populates="next_match",
-                                    foreign_keys=[next_match_id])
+    match      = relationship("Match")
+    player1    = relationship("User", foreign_keys=[player1_id])
+    player2    = relationship("User", foreign_keys=[player2_id])
+    winner     = relationship("User", foreign_keys=[winner_id])
 
-    def __repr__(self):
-        return f"<TournamentMatch(id={self.id}, tournament={self.tournament_id}, bracket={self.bracket_position})>"
+    next_match = relationship(
+        "TournamentMatch",
+        remote_side=[id],
+        foreign_keys=[next_match_id],
+        back_populates="previous_matches"
+    )
+    previous_matches = relationship(
+        "TournamentMatch",
+        back_populates="next_match",
+        foreign_keys=[next_match_id]
+    )
 
-    def to_dict(self) -> dict:
+    def __repr__(self) -> str:
+        return f"<TournamentMatch id={self.id} tournament={self.tournament_id} bracket={self.bracket_position}>"
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Сериализация для API / отображения."""
         return {
-            'id': self.id,
-            'tournament_id': self.tournament_id,
-            'bracket_position': self.bracket_position,
-            'round_number': self.round_number,
-            'match_number': self.match_number,
-            'player1_id': self.player1_id,
-            'player2_id': self.player2_id,
-            'winner_id': self.winner_id,
-            'is_completed': self.is_completed,
-            'scheduled_time': self.scheduled_time.isoformat() if self.scheduled_time else None,
-            'match_id': self.match_id
+            "id": self.id,
+            "tournament_id": self.tournament_id,
+            "bracket_position": self.bracket_position,
+            "round_number": self.round_number,
+            "match_number": self.match_number,
+            "player1_id": self.player1_id,
+            "player2_id": self.player2_id,
+            "winner_id": self.winner_id,
+            "is_completed": self.is_completed,
+            "scheduled_time": self.scheduled_time.isoformat() if self.scheduled_time else None,
+            "match_id": self.match_id
         }
 
 
-# Обратная связь для User
+# ─── Обратные связи в User ───────────────────────────────────────────────
+
 try:
     from models.user import User
 
-    User.tournaments_created = relationship("Tournament", foreign_keys="Tournament.created_by",
-                                            back_populates="creator")
-    User.tournament_matches_as_player1 = relationship("TournamentMatch", foreign_keys="TournamentMatch.player1_id",
-                                                      back_populates="player1")
-    User.tournament_matches_as_player2 = relationship("TournamentMatch", foreign_keys="TournamentMatch.player2_id",
-                                                      back_populates="player2")
-except:
+    User.tournaments_created = relationship(
+        "Tournament",
+        foreign_keys="Tournament.created_by",
+        back_populates="creator"
+    )
+    User.tournament_matches_as_player1 = relationship(
+        "TournamentMatch",
+        foreign_keys="TournamentMatch.player1_id",
+        back_populates="player1"
+    )
+    User.tournament_matches_as_player2 = relationship(
+        "TournamentMatch",
+        foreign_keys="TournamentMatch.player2_id",
+        back_populates="player2"
+    )
+except ImportError:
     pass

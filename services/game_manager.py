@@ -1,46 +1,64 @@
 # services/game_manager.py
 """
-Сервис для управления игровыми процессами Final 4.
-Обновленная версия с интеграцией BetValidator.
+Сервис-менеджер игровых процессов Final 4.
+
+Отвечает за:
+- проверку возможности начать матч
+- получение доступных игроков для ставки
+- валидацию и обработку ставок
+- работу с дополнительным временем
+- расчёт итогового результата матча
+
+Интегрирован с BetValidator и BetTracker.
 """
+
+from __future__ import annotations
+
+import logging
+from typing import List, Dict, Tuple, Optional, Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-import logging
-from typing import List, Dict, Tuple, Optional
 
 from models.user import User
 from models.match import Match, MatchStatus
 from models.bet_tracker import BetTracker, BetType
 from services.bet_validator import bet_validator
-from services.match_manager import match_manager
+from services.match_manager import match_manager   # предполагается, что есть
 
 logger = logging.getLogger(__name__)
 
 
 class GameManager:
-    """Менеджер игровых процессов Final 4 с проверкой ставок"""
+    """
+    Центральный менеджер игровых механик Final 4.
+    """
 
-    # Константа - состав команды по умолчанию
+    # Константы состава команды
     REQUIRED_FORMATION = {
-        'GK': 1,  # 1 вратарь
-        'DF': 5,  # 5 защитников
-        'MF': 6,  # 6 полузащитников
-        'FW': 4  # 4 форварда
+        'GK': 1,
+        'DF': 5,
+        'MF': 6,
+        'FW': 4
     }
 
-    # Всего 16 игроков
     TOTAL_PLAYERS = 16
 
-    async def get_user_game_state(self, session: AsyncSession, user_id: int) -> dict:
-        """Получает текущее игровое состояние пользователя"""
+    async def get_user_game_state(
+        self,
+        session: AsyncSession,
+        user_id: int
+    ) -> Dict[str, Any]:
+        """
+        Получает текущее игровое состояние пользователя:
+        - данные пользователя
+        - активный матч (если есть)
+        """
         try:
-            # Получаем пользователя
             user = await session.get(User, user_id)
             if not user:
                 return {"error": "Пользователь не найден"}
 
-            # Получаем активный матч
             active_match = await match_manager.get_active_match(session, user_id)
 
             return {
@@ -50,289 +68,209 @@ class GameManager:
             }
 
         except Exception as e:
-            logger.error(f"Error getting game state for user {user_id}: {e}")
+            logger.error(f"Ошибка получения состояния игры для user {user_id}: {e}")
             return {"error": str(e)}
 
-    async def can_start_match(self, session: AsyncSession, user_id: int) -> Tuple[bool, str]:
-        """Проверяет, может ли пользователь начать матч"""
+    async def can_start_match(
+        self,
+        session: AsyncSession,
+        user_id: int
+    ) -> Tuple[bool, str]:
+        """
+        Проверяет, может ли пользователь начать новый матч.
+
+        Возвращает: (можно_начать, причина_если_нельзя)
+        """
         try:
-            # Проверяем наличие активного матча
             active_match = await match_manager.get_active_match(session, user_id)
             if active_match:
                 return False, f"У вас уже есть активный матч #{active_match.id}"
 
+            # Здесь можно добавить другие проверки:
+            # - рейтинг
+            # - баланс
+            # - таймаут после предыдущего матча и т.д.
 
-
+            return True, ""
 
         except Exception as e:
-            logger.error(f"Error checking if user can start match: {e}")
+            logger.error(f"Ошибка проверки возможности начать матч для {user_id}: {e}")
             return False, "Ошибка проверки"
 
-    def _validate_team_formation(self, team_data: dict) -> Tuple[bool, str]:
-        """Проверяет корректность формации команды (1-5-6-4)"""
+    def _validate_team_formation(self, team_data: Dict) -> Tuple[bool, str]:
+        """
+        Проверяет, что команда соответствует требуемой формации 1-5-6-4.
+        """
         if not team_data or 'players' not in team_data:
             return False, "Нет данных о команде"
 
         players = team_data.get('players', [])
 
         if len(players) != self.TOTAL_PLAYERS:
-            return False, f"Нужно {self.TOTAL_PLAYERS} игроков (у вас {len(players)})"
+            return False, f"Нужно ровно {self.TOTAL_PLAYERS} игроков (у вас {len(players)})"
 
-        # Подсчитываем игроков по позициям
         counts = {'GK': 0, 'DF': 0, 'MF': 0, 'FW': 0}
 
         for player in players:
-            position = player.get('position', '').upper()
-            if position in counts:
-                counts[position] += 1
+            pos = player.get('position', '').upper()
+            if pos in counts:
+                counts[pos] += 1
             else:
-                return False, f"Неизвестная позиция: {position}"
+                return False, f"Неизвестная позиция игрока: {pos}"
 
-        # Проверяем формацию 1-5-6-4
-        for position, required in self.REQUIRED_FORMATION.items():
-            if counts[position] != required:
-                pos_names = {'GK': 'вратарей', 'DF': 'защитников', 'MF': 'полузащитников', 'FW': 'нападающих'}
-                return False, f"Нужно {required} {pos_names[position]} (у вас {counts[position]})"
+        for pos, required in self.REQUIRED_FORMATION.items():
+            if counts[pos] != required:
+                pos_names = {
+                    'GK': 'вратарь',
+                    'DF': 'защитников',
+                    'MF': 'полузащитников',
+                    'FW': 'нападающих'
+                }
+                return False, f"Нужно {required} {pos_names[pos]} (у вас {counts[pos]})"
 
         return True, ""
 
     async def get_available_players(
-            self,
-            session: AsyncSession,
-            match_id: int,
-            user_id: int
+        self,
+        session: AsyncSession,
+        match_id: int,
+        user_id: int
     ) -> List[Dict]:
         """
-        Возвращает доступных для ставки игроков с учетом всех ограничений.
+        Возвращает список игроков, доступных для ставки в текущем ходе.
 
-        Args:
-            session: Сессия БД
-            match_id: ID матча
-            user_id: ID пользователя
-
-        Returns:
-            Список доступных игроков
+        Использует bet_validator.get_available_players — уже включает все проверки.
         """
         try:
-            # Получаем матч
             match = await session.get(Match, match_id)
             if not match:
-                logger.error(f"Match {match_id} not found")
+                logger.error(f"Матч {match_id} не найден")
                 return []
 
-            # Проверяем, что это матч пользователя
-            if match.player1_id != user_id and match.player2_id != user_id:
-                logger.error(f"User {user_id} is not in match {match_id}")
+            if not match.is_player_in_match(user_id):
+                logger.error(f"Пользователь {user_id} не участник матча {match_id}")
                 return []
 
-            # Получаем данные команды пользователя ИЗ МАТЧА
             team_data = match.get_player_team_data(user_id)
             if not team_data:
-                logger.error(f"User {user_id} has no team data in match {match_id}")
+                logger.error(f"Нет данных команды для user {user_id} в матче {match_id}")
                 return []
 
             team_players = team_data.get('players', [])
 
-            # ДОБАВЬТЕ DEBUG PRINT ЗДЕСЬ:
-            print(f"DEBUG get_available_players: user_id={user_id}, match_id={match_id}")
-            print(f"DEBUG: player1_id={match.player1_id}, player2_id={match.player2_id}")
-            print(f"DEBUG: team_data exists? {bool(team_data)}")
-            print(f"DEBUG: team_players count={len(team_players)}")
-            print(f"DEBUG: Positions in team: {[p.get('position') for p in team_players]}")
-            print(f"DEBUG: GK players: {[p for p in team_players if p.get('position') == 'GK']}")
-
-            # Используем BetValidator для получения доступных игроков
-            available_players = await bet_validator.get_available_players(
-                match, user_id, team_players
+            # Основная логика делегируется в bet_validator
+            available = await bet_validator.get_available_players(
+                match=match,
+                user_id=user_id,
+                all_players=team_players
             )
 
-            logger.info(f"Found {len(available_players)} available players for user {user_id} in match {match_id}")
-            return available_players
+            return available
 
         except Exception as e:
-            logger.error(f"Error getting available players for user {user_id} in match {match_id}: {e}")
-            return []
-    async def get_available_bet_types(
-            self,
-            match: Match,
-            player_id: int,
-            position: str,
-            is_second_bet: bool = False
-    ) -> List[Tuple[str, str, List[str]]]:
-        """
-        Возвращает доступные типы ставок для игрока с русскими названиями.
-
-        Args:
-            match: Объект матча
-            player_id: ID игрока
-            position: Позиция игрока
-            is_second_bet: Это вторая ставка?
-
-        Returns:
-            Список кортежей (type_id, название_рус, список_значений)
-        """
-        try:
-            available = bet_validator.get_available_bet_types_with_names(
-                match, player_id, position, is_second_bet
-            )
-
-            # Преобразуем BetType в строки для удобства
-            result = []
-            for bet_type, name, values in available:
-                result.append((
-                    bet_type.value,  # 'even_odd', 'big_small', 'goal'
-                    name,
-                    values
-                ))
-
-            return result
-
-        except Exception as e:
-            logger.error(f"Error getting available bet types for player {player_id}: {e}")
+            logger.error(f"Ошибка получения доступных игроков для {user_id} в матче {match_id}: {e}")
             return []
 
-    async def validate_player_selection(
-            self,
-            session: AsyncSession,
-            match_id: int,
-            user_id: int,
-            player_id: int
+    async def validate_bet(
+        self,
+        session: AsyncSession,
+        match_id: int,
+        user_id: int,
+        player_id: int,
+        player_position: str,
+        bet_type: BetType,
+        bet_value: str,
+        is_second_bet: bool = False
     ) -> Tuple[bool, str]:
         """
-        Проверяет выбор игрока для ставки.
+        Полная валидация ставки перед её регистрацией.
 
-        Args:
-            session: Сессия БД
-            match_id: ID матча
-            user_id: ID пользователя
-            player_id: ID выбранного игрока
-
-        Returns:
-            (валидно, сообщение_об_ошибке)
+        Проверяет:
+        - ход пользователя
+        - доступность игрока
+        - допустимость типа и значения ставки
+        - квоты BetTracker
         """
         try:
-            # Получаем матч
             match = await session.get(Match, match_id)
             if not match:
                 return False, "Матч не найден"
 
-            # Проверяем, что это матч пользователя
-            if match.player1_id != user_id and match.player2_id != user_id:
-                return False, "Вы не участвуете в этом матче"
+            if match.get_current_user_id() != user_id:
+                return False, "Сейчас не ваш ход"
 
-            # Получаем данные команды пользователя ИЗ МАТЧА
-            team_data = match.get_player_team_data(user_id)  # ← ИЗМЕНЕНО
+            team_data = match.get_player_team_data(user_id)
             if not team_data:
                 return False, "Данные команды не найдены"
 
-            # Находим игрока в команде
-            team_players = team_data.get('players', [])  # ← ИЗМЕНЕНО
-            player = next((p for p in team_players if p.get('id') == player_id), None)
-
+            player = next((p for p in team_data.get('players', []) if p.get('id') == player_id), None)
             if not player:
                 return False, "Игрок не найден в вашей команде"
 
-            # Используем BetValidator для проверки
-            is_valid, message = await bet_validator.validate_player_selection(
-                match, user_id, player_id, player.get('position'), team_players
-            )
+            # Делегируем основную проверку в bet_validator
+            # (можно расширить дополнительными проверками)
+            tracker = match.bet_tracker
 
-            return is_valid, message
+            if bet_type == BetType.EVEN_ODD:
+                can, msg = tracker.can_bet_EVEN_ODD(player_id, player_position)
+            elif bet_type == BetType.BIG_SMALL:
+                can, msg = tracker.can_bet_big_small(player_id, player_position, is_second_bet)
+            elif bet_type == BetType.GOAL:
+                can, msg = tracker.can_bet_goal(player_position, player_id)
+            else:
+                return False, "Неизвестный тип ставки"
+
+            if not can:
+                return False, msg
+
+            # Дополнительно проверяем значение ставки
+            if bet_type == BetType.EVEN_ODD:
+                if bet_value not in ("чёт", "нечёт"):
+                    return False, "Неверное значение для Чёт/Нечёт"
+            elif bet_type == BetType.BIG_SMALL:
+                if bet_value not in ("меньше", "больше"):
+                    return False, "Неверное значение для Больше/Меньше"
+            elif bet_type == BetType.GOAL:
+                if bet_value not in ("1","2","3","4","5","6"):
+                    return False, "Неверное значение для точного числа"
+
+            return True, ""
 
         except Exception as e:
-            logger.error(f"Error validating player selection: {e}")
+            logger.error(f"Ошибка валидации ставки в матче {match_id}: {e}")
             return False, f"Ошибка проверки: {str(e)}"
 
-    async def validate_bet(
-            self,
-            match: Match,
-            player_id: int,
-            position: str,
-            bet_type_str: str,
-            bet_value: str,  # Может быть пустым при выборе типа
-            is_second_bet: bool = False
-    ) -> Tuple[bool, str]:
-        """
-        Проверяет ставку на корректность.
-
-        Args:
-            match: Объект матча
-            player_id: ID игрока
-            position: Позиция игрока
-            bet_type_str: Тип ставки (строка)
-            bet_value: Значение ставки (может быть пустым при проверке типа)
-            is_second_bet: Это вторая ставка?
-
-        Returns:
-            (валидно, сообщение_об_ошибке)
-        """
-        try:
-            # Преобразуем строку в BetType
-            bet_type = None
-            for bt in BetType:
-                if bt.value == bet_type_str:
-                    bet_type = bt
-                    break
-
-            if not bet_type:
-                return False, f"Неизвестный тип ставки: {bet_type_str}"
-
-            # Если значение не пустое - проверяем его
-            if bet_value and not bet_validator._is_valid_bet_value(bet_type, bet_value):
-                return False, f"Некорректное значение ставки: {bet_value}"
-
-            # Используем BetValidator для проверки типа ставки
-            # Передаем bet_value (может быть пустым)
-            is_valid, message = bet_validator.validate_bet_type(
-                match, player_id, position, bet_type, bet_value, is_second_bet
-            )
-
-            return is_valid, message
-
-        except Exception as e:
-            logger.error(f"Error validating bet: {e}")
-            return False, f"Ошибка проверки ставки: {str(e)}"
-
     async def process_bet(
-            self,
-            session: AsyncSession,
-            match_id: int,
-            user_id: int,
-            player_id: int,
-            bet_type: BetType,
-            bet_value: str
+        self,
+        session: AsyncSession,
+        match_id: int,
+        user_id: int,
+        player_id: int,
+        bet_type: BetType,
+        bet_value: str
     ) -> Tuple[bool, str, Dict]:
         """
-        Обрабатывает ставку игрока.
-
-        Returns:
-            (успех, сообщение, данные_результата)
+        Регистрирует ставку в BetTracker и сохраняет изменения.
         """
         try:
-            # Получаем матч
             match = await session.get(Match, match_id)
             if not match:
                 return False, "Матч не найден", {}
 
-            # Проверяем, что это ход пользователя
-            current_user_id = match.get_current_user_id()
-            if current_user_id != user_id:
+            if match.get_current_user_id() != user_id:
                 return False, "Сейчас не ваш ход", {}
 
-            # Получаем данные игрока ИЗ МАТЧА
-            team_data = match.get_player_team_data(user_id)  # ← ИЗМЕНЕНО
+            team_data = match.get_player_team_data(user_id)
             if not team_data:
                 return False, "Данные команды не найдены", {}
 
-            team_players = team_data.get('players', [])  # ← ИЗМЕНЕНО
-            player = next((p for p in team_players if p.get('id') == player_id), None)
-
+            player = next((p for p in team_data.get('players', []) if p.get('id') == player_id), None)
             if not player:
                 return False, "Игрок не найден", {}
 
             position = player.get('position')
 
-            # Регистрируем ставку в трекере
+            # Регистрируем в трекере
             tracker = match.bet_tracker
             tracker.register_bet(player_id, position, bet_type, bet_value)
             match.bet_tracker = tracker
@@ -347,94 +285,86 @@ class GameManager:
             }
 
         except Exception as e:
-            logger.error(f"Error processing bet: {e}")
+            logger.error(f"Ошибка обработки ставки в матче {match_id}: {e}")
             await session.rollback()
             return False, f"Ошибка обработки ставки: {str(e)}", {}
 
     async def get_extra_time_players(
-            self,
-            session: AsyncSession,
-            match_id: int,
-            user_id: int
+        self,
+        session: AsyncSession,
+        match_id: int,
+        user_id: int
     ) -> List[Dict]:
         """
-        Возвращает игроков, доступных для дополнительного времени.
-        Только те, кто не делал ставок в основном времени.
+        Возвращает игроков, доступных для выбора в дополнительное время:
+        те, кто НЕ делал ставок в основном времени.
         """
         try:
-            # Получаем матч
             match = await session.get(Match, match_id)
             if not match:
                 return []
 
-            # Получаем данные команды пользователя
-            user = await session.get(User, user_id)
-            if not user or not user.team_data:
+            team_data = match.get_player_team_data(user_id)
+            if not team_data:
                 return []
 
-            team_players = user.team_data.get('players', [])
+            team_players = team_data.get('players', [])
             tracker = match.bet_tracker
 
-            # Фильтруем игроков без ставок
-            extra_players = []
+            extra = []
             for player in team_players:
-                player_id = player.get('id')
-                if tracker.get_player_bet_count(player_id) == 0:
-                    extra_players.append(player)
+                pid = player.get('id')
+                if tracker.get_player_bet_count(pid) == 0:
+                    extra.append(player)
 
-            return extra_players
+            return extra
 
         except Exception as e:
-            logger.error(f"Error getting extra time players: {e}")
+            logger.error(f"Ошибка получения запасных для ДВ в матче {match_id}: {e}")
             return []
 
     async def validate_extra_time_selection(
-            self,
-            session: AsyncSession,
-            match_id: int,
-            user_id: int,
-            selected_player_ids: List[int]
+        self,
+        session: AsyncSession,
+        match_id: int,
+        user_id: int,
+        selected_player_ids: List[int]
     ) -> Tuple[bool, str]:
         """
-        Проверяет выбор игроков для дополнительного времени.
+        Проверяет корректность выбора 5 игроков для дополнительного времени.
         """
         try:
-            # Получаем матч
             match = await session.get(Match, match_id)
             if not match:
                 return False, "Матч не найден"
 
-            # Получаем данные команды пользователя
-            user = await session.get(User, user_id)
-            if not user or not user.team_data:
+            team_data = match.get_player_team_data(user_id)
+            if not team_data:
                 return False, "Данные команды не найдены"
 
-            team_players = user.team_data.get('players', [])
+            team_players = team_data.get('players', [])
 
-            # Используем BetValidator
-            is_valid, message = bet_validator.check_extra_time_players(
-                match, user_id, selected_player_ids, team_players
+            return bet_validator.check_extra_time_players(
+                match=match,
+                user_id=user_id,
+                selected_ids=selected_player_ids,
+                all_players=team_players
             )
 
-            return is_valid, message
-
         except Exception as e:
-            logger.error(f"Error validating extra time selection: {e}")
+            logger.error(f"Ошибка проверки выбора ДВ в матче {match_id}: {e}")
             return False, f"Ошибка проверки: {str(e)}"
 
     def calculate_match_result(
-            self,
-            player1_actions: Dict,
-            player2_actions: Dict
+        self,
+        player1_actions: Dict[str, int],
+        player2_actions: Dict[str, int]
     ) -> Tuple[int, int, str]:
         """
-        Рассчитывает результат матча.
-
-        Returns:
-            (голы_игрока1, голы_игрока2, описание_расчета)
+        Рассчитывает итоговый счёт матча по накопленным действиям.
         """
         return bet_validator.calculate_match_result(player1_actions, player2_actions)
 
 
-# Глобальный экземпляр менеджера
+# Глобальный экземпляр
 game_manager = GameManager()

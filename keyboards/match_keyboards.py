@@ -1,26 +1,417 @@
-# keyboards/match_keyboards.py
+# handlers/start.py
 """
-Клавиатуры для игрового процесса Final 4.
+Обработчики команд старта и основного меню для Final 4.
 """
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from typing import List, Dict, Optional, Tuple
-from models.match import Match, MatchStatus
+from aiogram import F, Router
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from sqlalchemy import func, select
+
+from bot.database import AsyncSessionLocal
+from models.user import User
+from utils.db_helpers import get_user_with_team
 from utils.emoji import EMOJI
 
+router = Router(name="start")
 
-class MatchKeyboards:
-    """Клавиатуры для матчей Final 4"""
 
-    @staticmethod
-    def get_main_menu() -> InlineKeyboardMarkup:
-        """Главное меню матчей"""
-        return InlineKeyboardMarkup(
+@router.message(CommandStart())
+async def command_start(message: Message, state: FSMContext):
+    """
+    Обработчик команды /start — регистрация/приветствие пользователя + главное меню.
+
+    Очищает состояние FSM, регистрирует нового пользователя или обновляет
+    последнего активного у существующего, показывает приветственный текст
+    и основную клавиатуру.
+    """
+    await state.clear()
+
+    user_id = message.from_user.id
+    username = message.from_user.username
+    first_name = message.from_user.first_name
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == user_id)
+        )
+        user = result.scalar_one_or_none()
+
+        if not user:
+            # Новый пользователь
+            user = User(
+                telegram_id=user_id,
+                username=username,
+                first_name=first_name,
+                last_name=message.from_user.last_name
+            )
+            session.add(user)
+            await session.commit()
+
+            welcome_text = f"""{EMOJI['welcome']} Добро пожаловать в FINAL 4, {first_name}!
+
+{EMOJI['info']} <b>FINAL 4</b> — это стратегическая футбольная настольная игра, где вы выступаете в роли менеджера.
+
+{EMOJI['rules']} <b>Основные правила:</b>
+• Управляйте командой из 16 футболистов
+• Делайте ставки на броски кубика
+• Используйте карточки «Свисток»
+• Соревнуйтесь с другими игроками
+
+{EMOJI['play']} <b>Начните с создания команды!</b>
+
+Используйте команду /team для создания своей команды из 16 футболистов."""
+        else:
+            # Существующий пользователь
+            user.last_active = func.now()
+            await session.commit()
+
+            welcome_text = f"""{EMOJI['welcome']} С возвращением, {first_name}!
+
+{EMOJI['stats']} <b>Ваша статистика:</b>
+• Игр сыграно: {user.games_played}
+• Побед: {user.games_won}
+• Процент побед: {user.win_rate:.1f}%
+
+{EMOJI['play']} <b>Что хотите сделать?</b>
+
+Используйте команды:
+/play — Начать новую игру
+/matches — Мои матчи
+/help — Правила игры"""
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI['play']} Играть",
+                    callback_data="play_game"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI['help']} Помощь",
+                    callback_data="show_help"
+                ),
+                InlineKeyboardButton(
+                    text=f"{EMOJI['profile']} Профиль",
+                    callback_data="show_profile"
+                ),
+                InlineKeyboardButton(
+                    text=f"{EMOJI['rules']} Правила",
+                    callback_data="show_rules"
+                )
+            ]
+        ]
+    )
+
+    await message.answer(
+        welcome_text,
+        reply_markup=keyboard,
+        parse_mode='HTML'
+    )
+
+
+@router.message(Command("help"))
+async def command_help(message: Message):
+    """
+    Обработчик команды /help — список основных команд и краткая справка.
+    """
+    help_text = f"""{EMOJI['help']} <b>Помощь по командам:</b>
+
+{EMOJI['play']} <b>Основные команды:</b>
+/start — Главное меню
+/help — Эта справка
+/profile — Ваш профиль
+/team — Управление командой
+/play — Найти матч
+/rules — Правила игры
+
+{EMOJI['info']} <b>Как начать играть?</b>
+1. Используйте /team для создания команды из 16 игроков
+2. Используйте /play для поиска матча
+3. Делайте ставки на броски кубика
+4. Используйте карточки «Свисток» для влияния на игру
+
+{EMOJI['rules']} <b>Типы ставок:</b>
+• Чет/Нечет — даёт «отбития»
+• 1-3/4-6 (Меньше/Больше) — даёт «передачи»
+• Точное число — даёт «голы»
+
+{EMOJI['card']} <b>Карточки «Свисток»:</b>
+В колоде 40 карточек с различными эффектами.
+Берите карточку после успешной ставки.
+
+{EMOJI['support']} <b>Поддержка:</b>
+По всем вопросам: @final4_support"""
+
+    await message.answer(help_text, parse_mode='HTML')
+
+
+@router.message(Command("rules"))
+async def command_rules(message: Message):
+    """
+    Обработчик команды /rules — краткие правила игры + кнопки перехода.
+    """
+    rules_text = f"""{EMOJI['rules']} <b>Краткие правила FINAL 4:</b>
+
+{EMOJI['target']} <b>Цель игры:</b>
+Победить соперника, набрав больше очков за 4 раунда.
+
+{EMOJI['team']} <b>Состав команды:</b>
+• 1 вратарь (GK)
+• 5 защитников (DF)
+• 6 полузащитников (MF)
+• 4 нападающих (FW)
+Всего: 16 игроков
+
+{EMOJI['formation']} <b>Допустимые формации:</b>
+1-5-3-2, 1-5-2-3, 1-4-4-2, 1-4-3-3,
+1-3-5-2, 1-3-4-3, 1-3-3-4
+
+{EMOJI['dice']} <b>Ход игры:</b>
+1. Менеджер делает ставки на футболистов
+2. Бросается кубик (1-6)
+3. При успешной ставке футболист получает действия
+4. Берется карточка «Свисток»
+5. Подсчитываются «отбития», «передачи» и «голы»
+
+{EMOJI['card']} <b>Карточки «Свисток» (40 штук):</b>
+• Хэт-трик, Дубль, Гол
+• Автогол, ВАР, Офсайд
+• Пенальти, Удаление, Предупреждение
+• Фол, Потеря, Перехват, Отбор
+
+{EMOJI['calc']} <b>Подсчет результата:</b>
+• Из «отбитий» соперника вычитаем свои «передачи»
+• Если «передач» >= «отбитий», все «голы» засчитываются
+• Если «отбитий» больше, то на их уничтожение тратятся «голы»
+
+{EMOJI['penalty']} <b>При ничьей:</b>
+1. Дополнительное время (5 игроков)
+2. Серия пенальти
+3. Жребий"""
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI['play']} Начать играть",
+                    callback_data="play_game"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI['help']} Подробная справка",
+                    callback_data="detailed_rules"
+                )
+            ]
+        ]
+    )
+
+    await message.answer(rules_text, reply_markup=keyboard, parse_mode='HTML')
+
+
+@router.message(Command("profile"))
+async def command_profile(message: Message):
+    """
+    Обработчик команды /profile — отображение профиля игрока.
+    """
+    user_id = message.from_user.id
+
+    async with AsyncSessionLocal() as session:
+        user, _ = await get_user_with_team(session, user_id)
+
+        if not user:
+            await message.answer("Сначала зарегистрируйтесь через /start")
+            return
+
+        profile_text = f"""{EMOJI['profile']} <b>Профиль игрока</b>
+
+{EMOJI['user']} <b>Игрок:</b> {user.first_name or 'Аноним'}
+{EMOJI['id']} <b>ID:</b> {user.telegram_id}
+{EMOJI['rating']} <b>Рейтинг ELO:</b> {user.rating}
+
+{EMOJI['stats']} <b>Статистика:</b>
+🎮 Сыграно: {user.games_played}
+✅ Побед: {user.games_won}
+📊 Процент побед: {user.win_rate:.1f}%
+
+{EMOJI['time']} <b>Активность:</b>
+🕒 Последняя активность: {user.last_active.strftime('%d.%m.%Y %H:%M')}"""
+
+        keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text=f"{EMOJI['vs']} Против соперника",
+                        text=f"{EMOJI['play']} Играть",
+                        callback_data="play_game"
+                    )
+                ]
+            ]
+        )
+
+        await message.answer(profile_text, reply_markup=keyboard, parse_mode='HTML')
+
+
+@router.callback_query(F.data == "show_profile")
+async def show_profile_callback(callback: CallbackQuery):
+    """
+    Callback кнопки «Профиль» — вызывает отображение профиля.
+    """
+    await callback.answer()
+    await command_profile(callback.message)
+
+
+@router.callback_query(F.data == "show_help")
+async def show_help_callback(callback: CallbackQuery):
+    """
+    Callback кнопки «Помощь» — вызывает справку по командам.
+    """
+    await callback.answer()
+    await command_help(callback.message)
+
+
+@router.callback_query(F.data == "show_rules")
+async def show_rules_callback(callback: CallbackQuery):
+    """
+    Callback кнопки «Правила» — вызывает краткие правила.
+    """
+    await callback.answer()
+    await command_rules(callback.message)
+
+
+@router.callback_query(F.data == "detailed_rules")
+async def detailed_rules_callback(callback: CallbackQuery):
+    """
+    Callback кнопки «Подробная справка» — полные правила игры.
+    """
+    rules_text = f"""{EMOJI['rules']} <b>ПОЛНЫЕ ПРАВИЛА FINAL 4</b>
+
+{EMOJI['target']} <b>Цель игры:</b> Победить соперника.
+
+{EMOJI['format']} <b>Форматы игры:</b>
+1. Против случайного соперника
+2. Против бота
+3. Турнир плей-офф
+
+{EMOJI['team']} <b>Состав команды:</b>
+У каждого менеджера 16 футболистов:
+• 1 вратарь (GK)
+• 5 защитников (DF)
+• 6 полузащитников (MF)
+• 4 форварда (FW)
+
+{EMOJI['formation']} <b>Допустимые формации:</b>
+1-5-3-2, 1-5-2-3, 1-4-4-2, 1-4-3-3,
+1-3-5-2, 1-3-4-3, 1-3-3-4
+
+{EMOJI['dice']} <b>Полезные действия:</b>
+При успешной ставке менеджера:
+• Вратарь: 3 «отбития»
+• Защитник: 2 «отбития» или 1 «передача»
+• Полузащитник: 1 «отбитие» или 2 «передачи»
+• Форвард: 1 «передача»
+
+{EMOJI['bet']} <b>Ставка менеджера:</b>
+Перед броском кубика менеджер делает 2 ставки на футболиста:
+1. Чет/Нечет → «отбития»
+2. 1-3/4-6 (Меньше/Больше) → «передачи»
+3. Точное число → «гол»
+
+{EMOJI['limit']} <b>Ограничения ставок:</b>
+• Ставка на Чет/Нечет: только у 6 футболистов (включая вратаря)
+• Ставка на Чет/Нечет у вратаря: обязательна
+• Ставка на гол: 1 защитник, 3 полузащитника, 4 форварда
+
+{EMOJI['card']} <b>Карточки «Свисток» (40 карт):</b>
+• Хэт-Трик (1) — 3 гола
+• Дубль (1) — 2 гола
+• Гол (2) — 1 гол
+• Автогол (1) — +1 гол сопернику
+• ВАР (2) — отменяет карточку соперника
+• Офсайд (2) — отменяет гол соперника
+• Пенальти (2) — ставка на Больше/Меньше
+• Удаление (2) — потеря всех действий
+• Предупреждение (3) — потеря 1 действия
+• Фол (6) — потеря «отбития»
+• Потеря (6) — потеря «передачи»
+• Перехват (6) — +1 «передача»
+• Отбор (6) — +1 «отбитие»
+
+{EMOJI['match']} <b>Ход матча:</b>
+1. Первый бросает создатель игры
+2. Первая ставка всегда на вратаря
+3. Карточку берут сразу после успешной ставки
+4. Все действия фиксируются
+
+{EMOJI['calc']} <b>Подсчет голов:</b>
+1. Берем «отбития» соперника
+2. Вычитаем свои «передачи»
+3. Если «передач» >= «отбитий» → все «голы» засчитываются
+4. Если «отбитий» больше → тратим «голы» (1 гол = 2 отбития)
+
+{EMOJI['example']} <b>Пример расчета:</b>
+Команда 1: 2 Г, 6 П, 10 О
+Команда 2: 3 Г, 7 П, 6 О
+
+Голы Команды 1: 6о - 6п = 0о → 2 гола
+Голы Команды 2: 10о - 7п = 3о → 3о/2 = 1.5 → 1 гол
+Итог: 2:1
+
+{EMOJI['extra']} <b>Дополнительное время:</b>
+При ничьей назначается ДВ с 5 футболистами из запасных.
+
+{EMOJI['penalty']} <b>Пенальти:</b>
+Если ДВ не выявило победителя, проводится серия пенальти."""
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI['play']} Начать играть",
+                    callback_data="play_game"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"{EMOJI['back']} Назад",
+                    callback_data="show_rules"
+                )
+            ]
+        ]
+    )
+
+    await callback.message.edit_text(rules_text, reply_markup=keyboard, parse_mode='HTML')
+    await callback.answer()
+
+
+@router.callback_query(F.data == "play_game")
+async def play_game_callback(callback: CallbackQuery):
+    """
+    Callback кнопки «Играть» — показывает выбор типа матча.
+    """
+    user_id = callback.from_user.id
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == user_id)
+        )
+        user = result.scalar_one_or_none()
+
+        if not user:
+            await callback.answer("Сначала зарегистрируйтесь")
+            return
+
+        text = f"{EMOJI['play']} <b>Выберите тип игры:</b>"
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=f"{EMOJI['vs']} Против случайного соперника",
                         callback_data="match_type_vs_random"
                     )
                 ],
@@ -33,13 +424,7 @@ class MatchKeyboards:
                 [
                     InlineKeyboardButton(
                         text=f"{EMOJI['tournament']} Турнир",
-                        callback_data="match_type_tournament"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['list']} Мои матчи",
-                        callback_data="show_matches"
+                        callback_data="match_tournament"
                     )
                 ],
                 [
@@ -51,645 +436,15 @@ class MatchKeyboards:
             ]
         )
 
-    @staticmethod
-    def get_bot_difficulty() -> InlineKeyboardMarkup:
-        """Выбор сложности бота"""
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['easy']} Легкий",
-                        callback_data="bot_difficulty_easy"
-                    ),
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['medium']} Средний",
-                        callback_data="bot_difficulty_medium"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['hard']} Сложный",
-                        callback_data="bot_difficulty_hard"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['back']} Назад",
-                        callback_data="play_game"
-                    )
-                ]
-            ]
-        )
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
 
-    @staticmethod
-    def get_search_cancel(match_id: int) -> InlineKeyboardMarkup:
-        """Отмена поиска соперника"""
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['cancel']} Отменить поиск",
-                        callback_data=f"cancel_search_{match_id}"
-                    )
-                ]
-            ]
-        )
+    await callback.answer()
 
-    @staticmethod
-    def get_match_actions(match_id: int, can_start: bool = False) -> InlineKeyboardMarkup:
-        """Действия с матчем"""
-        buttons = []
 
-        if can_start:
-            buttons.append([
-                InlineKeyboardButton(
-                    text=f"{EMOJI['play']} Начать матч",
-                    callback_data=f"start_match_{match_id}"
-                )
-            ])
-
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"{EMOJI['cancel']} Отменить матч",
-                callback_data=f"cancel_match_{match_id}"
-            )
-        ])
-
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"{EMOJI['back']} Назад",
-                callback_data="show_matches"
-            )
-        ])
-
-        return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-    @staticmethod
-    def get_match_control(match_id: int, is_player_turn: bool) -> InlineKeyboardMarkup:
-        """Управление матчем"""
-        buttons = []
-
-        if is_player_turn:
-            buttons.append([
-                InlineKeyboardButton(
-                    text=f"{EMOJI['dice']} Сделать ход",
-                    callback_data=f"continue_match_{match_id}"
-                )
-            ])
-        else:
-            buttons.append([
-                InlineKeyboardButton(
-                    text=f"{EMOJI['wait']} Ожидание...",
-                    callback_data="waiting"
-                )
-            ])
-
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"{EMOJI['surrender']} Сдаться",
-                callback_data=f"surrender_match_{match_id}"
-            ),
-            InlineKeyboardButton(
-                text=f"{EMOJI['info']} Статистика",
-                callback_data=f"match_stats_{match_id}"
-            )
-        ])
-
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"{EMOJI['back']} К списку матчей",
-                callback_data="show_matches"
-            )
-        ])
-
-        return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-    @staticmethod
-    def get_player_selection(players: List[Dict], match_id: int) -> InlineKeyboardMarkup:
-        """Выбор игрока для ставки"""
-        buttons = []
-
-        for player in players[:8]:  # Ограничиваем показ
-            position = player.get('position', '')
-            emoji = MatchKeyboards._get_position_emoji(position)
-
-            buttons.append([
-                InlineKeyboardButton(
-                    text=f"{emoji} {player.get('name', 'Игрок')} (#{player.get('number', '?')})",
-                    callback_data=f"select_player_{match_id}_{player.get('id', 0)}"
-                )
-            ])
-
-        # Если игроков больше 8, добавляем пагинацию
-        if len(players) > 8:
-            buttons.append([
-                InlineKeyboardButton(
-                    text=f"{EMOJI['left']} Назад",
-                    callback_data=f"players_page_{match_id}_prev"
-                ),
-                InlineKeyboardButton(
-                    text=f"{EMOJI['right']} Вперед",
-                    callback_data=f"players_page_{match_id}_next"
-                )
-            ])
-
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"{EMOJI['cancel']} Отмена хода",
-                callback_data=f"cancel_turn_{match_id}"
-            )
-        ])
-
-        return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-    @staticmethod
-    def get_bet_type_selection(match_id: int, player_id: int, available_bets: List[str]) -> InlineKeyboardMarkup:
-        """Выбор типа ставки"""
-        buttons = []
-
-        bet_types = {
-            'odd_even': (f"{EMOJI['defense']} Чет/Нечет", "отбития"),
-            'less_more': (f"{EMOJI['pass']} Меньше/Больше", "передачи"),
-            'exact': (f"{EMOJI['goal']} Точное число", "голы")
-        }
-
-        for bet_type in available_bets:
-            if bet_type in bet_types:
-                emoji_text, action = bet_types[bet_type]
-                buttons.append([
-                    InlineKeyboardButton(
-                        text=emoji_text,
-                        callback_data=f"select_bet_{match_id}_{player_id}_{bet_type}"
-                    )
-                ])
-
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"{EMOJI['back']} Назад к игрокам",
-                callback_data=f"back_to_players_{match_id}"
-            )
-        ])
-
-        return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-    @staticmethod
-    def get_odd_even_selection(match_id: int, player_id: int, bet_type: str) -> InlineKeyboardMarkup:
-        """Выбор Чет/Нечет"""
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="Чет (2, 4, 6)",
-                        callback_data=f"bet_value_{match_id}_{player_id}_{bet_type}_чет"
-                    ),
-                    InlineKeyboardButton(
-                        text="Нечет (1, 3, 5)",
-                        callback_data=f"bet_value_{match_id}_{player_id}_{bet_type}_нечет"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['back']} Назад",
-                        callback_data=f"back_to_bet_type_{match_id}_{player_id}"
-                    )
-                ]
-            ]
-        )
-
-    @staticmethod
-    def get_less_more_selection(match_id: int, player_id: int, bet_type: str) -> InlineKeyboardMarkup:
-        """Выбор Меньше/Больше"""
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="Меньше (1, 2, 3)",
-                        callback_data=f"bet_value_{match_id}_{player_id}_{bet_type}_меньше"
-                    ),
-                    InlineKeyboardButton(
-                        text="Больше (4, 5, 6)",
-                        callback_data=f"bet_value_{match_id}_{player_id}_{bet_type}_больше"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['back']} Назад",
-                        callback_data=f"back_to_bet_type_{match_id}_{player_id}"
-                    )
-                ]
-            ]
-        )
-
-    @staticmethod
-    def get_exact_number_selection(match_id: int, player_id: int, bet_type: str) -> InlineKeyboardMarkup:
-        """Выбор точного числа"""
-        buttons = []
-        row = []
-
-        for i in range(1, 7):
-            row.append(InlineKeyboardButton(
-                text=str(i),
-                callback_data=f"bet_value_{match_id}_{player_id}_{bet_type}_{i}"
-            ))
-
-            if i % 3 == 0:
-                buttons.append(row)
-                row = []
-
-        if row:
-            buttons.append(row)
-
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"{EMOJI['back']} Назад",
-                callback_data=f"back_to_bet_type_{match_id}_{player_id}"
-            )
-        ])
-
-        return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-    @staticmethod
-    def get_card_usage(card_instance_id: int, match_id: int) -> InlineKeyboardMarkup:
-        """Использование карточки"""
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['card']} Использовать карточку",
-                        callback_data=f"use_card_{match_id}_{card_instance_id}"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['skip']} Пропустить",
-                        callback_data=f"skip_card_{match_id}"
-                    )
-                ]
-            ]
-        )
-
-    @staticmethod
-    def get_card_target_selection(match_id: int, card_instance_id: int,
-                                  available_targets: List[Dict]) -> InlineKeyboardMarkup:
-        """Выбор цели для карточки"""
-        buttons = []
-
-        for target in available_targets[:6]:
-            position = target.get('position', '')
-            emoji = MatchKeyboards._get_position_emoji(position)
-
-            buttons.append([
-                InlineKeyboardButton(
-                    text=f"{emoji} {target.get('name', 'Игрок')}",
-                    callback_data=f"card_target_{match_id}_{card_instance_id}_{target.get('id', 0)}"
-                )
-            ])
-
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"{EMOJI['cancel']} Отмена",
-                callback_data=f"cancel_card_{match_id}_{card_instance_id}"
-            )
-        ])
-
-        return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-    @staticmethod
-    def get_turn_result_actions(match_id: int, has_card: bool = False) -> InlineKeyboardMarkup:
-        """Действия после хода"""
-        buttons = []
-
-        if has_card:
-            buttons.append([
-                InlineKeyboardButton(
-                    text=f"{EMOJI['card']} Посмотреть карточку",
-                    callback_data=f"view_card_{match_id}"
-                )
-            ])
-
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"{EMOJI['continue']} Продолжить",
-                callback_data=f"continue_after_turn_{match_id}"
-            )
-        ])
-
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"{EMOJI['stats']} Статистика матча",
-                callback_data=f"match_stats_{match_id}"
-            )
-        ])
-
-        return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-    @staticmethod
-    def get_match_result_actions(match_id: int, is_rematch_possible: bool = True) -> InlineKeyboardMarkup:
-        """Действия после завершения матча"""
-        buttons = []
-
-        if is_rematch_possible:
-            buttons.append([
-                InlineKeyboardButton(
-                    text=f"{EMOJI['rematch']} Реванш",
-                    callback_data=f"rematch_{match_id}"
-                )
-            ])
-
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"{EMOJI['stats']} Детальная статистика",
-                callback_data=f"detailed_stats_{match_id}"
-            ),
-            InlineKeyboardButton(
-                text=f"{EMOJI['share']} Поделиться",
-                callback_data=f"share_match_{match_id}"
-            )
-        ])
-
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"{EMOJI['play']} Новая игра",
-                callback_data="play_game"
-            ),
-            InlineKeyboardButton(
-                text=f"{EMOJI['menu']} Главное меню",
-                callback_data="main_menu"
-            )
-        ])
-
-        return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-    @staticmethod
-    def get_surrender_confirmation(match_id: int) -> InlineKeyboardMarkup:
-        """Подтверждение сдачи"""
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['yes']} Да, сдаюсь",
-                        callback_data=f"confirm_surrender_{match_id}"
-                    ),
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['no']} Нет, продолжу",
-                        callback_data=f"cancel_surrender_{match_id}"
-                    )
-                ]
-            ]
-        )
-
-    @staticmethod
-    def get_match_list(matches: List[Match], page: int = 0, has_more: bool = False) -> InlineKeyboardMarkup:
-        """Список матчей с пагинацией"""
-        buttons = []
-
-        for match in matches:
-            status_emoji = MatchKeyboards._get_match_status_emoji(match.status)
-
-            buttons.append([
-                InlineKeyboardButton(
-                    text=f"{status_emoji} Матч #{match.id}",
-                    callback_data=f"match_detail_{match.id}"
-                )
-            ])
-
-        # Пагинация
-        pagination_buttons = []
-
-        if page > 0:
-            pagination_buttons.append(
-                InlineKeyboardButton(
-                    text=f"{EMOJI['left']} Назад",
-                    callback_data=f"matches_page_{page - 1}"
-                )
-            )
-
-        if has_more:
-            pagination_buttons.append(
-                InlineKeyboardButton(
-                    text=f"{EMOJI['right']} Вперед",
-                    callback_data=f"matches_page_{page + 1}"
-                )
-            )
-
-        if pagination_buttons:
-            buttons.append(pagination_buttons)
-
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"{EMOJI['play']} Новый матч",
-                callback_data="play_game"
-            ),
-            InlineKeyboardButton(
-                text=f"{EMOJI['menu']} Главное меню",
-                callback_data="main_menu"
-            )
-        ])
-
-        return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-    @staticmethod
-    def get_tournament_selection() -> InlineKeyboardMarkup:
-        """Выбор типа турнира"""
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['tournament']} 4 участника",
-                        callback_data="tournament_4"
-                    ),
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['tournament']} 8 участников",
-                        callback_data="tournament_8"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['tournament']} 16 участников",
-                        callback_data="tournament_16"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['list']} Активные турниры",
-                        callback_data="active_tournaments"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['back']} Назад",
-                        callback_data="play_game"
-                    )
-                ]
-            ]
-        )
-
-    @staticmethod
-    def get_tournament_registration(tournament_id: int, is_registered: bool = False) -> InlineKeyboardMarkup:
-        """Регистрация на турнир"""
-        buttons = []
-
-        if not is_registered:
-            buttons.append([
-                InlineKeyboardButton(
-                    text=f"{EMOJI['register']} Зарегистрироваться",
-                    callback_data=f"register_tournament_{tournament_id}"
-                )
-            ])
-        else:
-            buttons.append([
-                InlineKeyboardButton(
-                    text=f"{EMOJI['cancel']} Отменить регистрацию",
-                    callback_data=f"unregister_tournament_{tournament_id}"
-                )
-            ])
-
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"{EMOJI['info']} Информация",
-                callback_data=f"tournament_info_{tournament_id}"
-            ),
-            InlineKeyboardButton(
-                text=f"{EMOJI['bracket']} Сетка",
-                callback_data=f"tournament_bracket_{tournament_id}"
-            )
-        ])
-
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"{EMOJI['back']} Назад",
-                callback_data="tournament_list"
-            )
-        ])
-
-        return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-    @staticmethod
-    def get_bet_rules_help() -> InlineKeyboardMarkup:
-        """Помощь по правилам ставок"""
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['rules']} Подробные правила",
-                        callback_data="detailed_rules"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text=f"{EMOJI['play']} Начать игру",
-                        callback_data="play_game"
-                    )
-                ]
-            ]
-        )
-
-    # Вспомогательные методы
-
-    @staticmethod
-    def _get_position_emoji(position: str) -> str:
-        """Возвращает emoji для позиции"""
-        emojis = {
-            'GK': EMOJI.get('gk', '🥅'),
-            'DF': EMOJI.get('df', '🛡️'),
-            'MF': EMOJI.get('mf', '⚡'),
-            'FW': EMOJI.get('fw', '⚽')
-        }
-        return emojis.get(position, '👤')
-
-    @staticmethod
-    def _get_match_status_emoji(status: MatchStatus) -> str:
-        """Возвращает emoji для статуса матча"""
-        emojis = {
-            MatchStatus.CREATED: '📝',
-            MatchStatus.WAITING: '🔍',
-            MatchStatus.IN_PROGRESS: '⚽',
-            MatchStatus.FINISHED: '🏁',
-            MatchStatus.CANCELLED: '❌',
-            MatchStatus.EXTRA_TIME: '⏰',
-            MatchStatus.PENALTY: '🎯'
-        }
-        return emojis.get(status, '❓')
-
-    @staticmethod
-    def create_dynamic_keyboard(buttons_data: List[Tuple[str, str]],
-                                rows: int = 2,
-                                back_button: bool = True,
-                                back_callback: str = "main_menu") -> InlineKeyboardMarkup:
-        """Создает динамическую клавиатуру"""
-        keyboard_buttons = []
-        row = []
-
-        for i, (text, callback_data) in enumerate(buttons_data):
-            row.append(InlineKeyboardButton(text=text, callback_data=callback_data))
-
-            if (i + 1) % rows == 0 or i == len(buttons_data) - 1:
-                keyboard_buttons.append(row)
-                row = []
-
-        if back_button:
-            keyboard_buttons.append([
-                InlineKeyboardButton(
-                    text=f"{EMOJI['back']} Назад",
-                    callback_data=back_callback
-                )
-            ])
-
-        return InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-
-
-# Быстрые функции для часто используемых клавиатур
-def quick_match_actions(match_id: int) -> InlineKeyboardMarkup:
-    """Быстрое создание клавиатуры действий матча"""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=f"{EMOJI['play']} Продолжить",
-                    callback_data=f"continue_match_{match_id}"
-                ),
-                InlineKeyboardButton(
-                    text=f"{EMOJI['info']} Статистика",
-                    callback_data=f"match_stats_{match_id}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=f"{EMOJI['surrender']} Сдаться",
-                    callback_data=f"surrender_match_{match_id}"
-                )
-            ]
-        ]
-    )
-
-
-def quick_back_button(back_to: str = "main_menu") -> InlineKeyboardMarkup:
-    """Простая кнопка 'Назад'"""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=f"{EMOJI['back']} Назад",
-                    callback_data=back_to
-                )
-            ]
-        ]
-    )
-
-
-def quick_yes_no(match_id: int, action: str) -> InlineKeyboardMarkup:
-    """Клавиатура Да/Нет для подтверждения"""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=f"{EMOJI['yes']} Да",
-                    callback_data=f"confirm_{action}_{match_id}"
-                ),
-                InlineKeyboardButton(
-                    text=f"{EMOJI['no']} Нет",
-                    callback_data=f"cancel_{action}_{match_id}"
-                )
-            ]
-        ]
-    )
+@router.callback_query(F.data == "main_menu")
+async def main_menu_callback(callback: CallbackQuery, state: FSMContext):
+    """
+    Callback кнопки «Назад» / «Главное меню» — возвращает в стартовое меню.
+    """
+    await callback.answer()
+    await command_start(callback.message, state)

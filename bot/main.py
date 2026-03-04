@@ -15,7 +15,7 @@ from bot.config import load_config
 # Импортируем роутеры
 from handlers.start import router as start_router
 from handlers.match import router as match_router
-
+from database import init_db, engine, AsyncSessionLocal
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
@@ -42,7 +42,7 @@ async def main():
         # Регистрация роутеров
         dp.include_router(start_router)
         dp.include_router(match_router)
-
+        await init_db()
         logger.info("Бот запущен (MemoryStorage)")
 
         # Удаление вебхука и запуск polling

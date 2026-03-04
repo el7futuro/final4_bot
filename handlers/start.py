@@ -3,16 +3,16 @@
 Обработчики команд старта и основного меню для Final 4.
 """
 
-from aiogram import Router, F
+from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
 from aiogram.fsm.context import FSMContext
-from sqlalchemy import select, func, text
-from aiogram.fsm.context import FSMContext
-from utils.db_helpers import get_user_with_team, get_user_by_telegram_id
-from models.user import User
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+
+from sqlalchemy import func, select
 
 from bot.database import AsyncSessionLocal
+from models.user import User
+from utils.db_helpers import get_user_with_team
 from utils.emoji import EMOJI
 
 router = Router(name="start")
@@ -20,16 +20,20 @@ router = Router(name="start")
 
 @router.message(CommandStart())
 async def command_start(message: Message, state: FSMContext):
-    """Обработчик команды /start"""
+    """
+    Обработчик команды /start — регистрация/приветствие пользователя + главное меню.
+
+    Очищает состояние FSM, регистрирует нового пользователя или обновляет
+    последнего активного у существующего, показывает приветственный текст
+    и основную клавиатуру.
+    """
     await state.clear()
 
     user_id = message.from_user.id
     username = message.from_user.username
     first_name = message.from_user.first_name
 
-    # Регистрируем/обновляем пользователя
     async with AsyncSessionLocal() as session:
-        # Получаем пользователя по telegram_id
         result = await session.execute(
             select(User).where(User.telegram_id == user_id)
         )
@@ -63,25 +67,24 @@ async def command_start(message: Message, state: FSMContext):
             # Существующий пользователь
             user.last_active = func.now()
             await session.commit()
+
             welcome_text = f"""{EMOJI['welcome']} С возвращением, {first_name}!
 
-            {EMOJI['stats']} <b>Ваша статистика:</b>
-            • Игр сыграно: {user.games_played}
-            • Побед: {user.games_won}
-            • Процент побед: {user.win_rate:.1f}%
+{EMOJI['stats']} <b>Ваша статистика:</b>
+• Игр сыграно: {user.games_played}
+• Побед: {user.games_won}
+• Процент побед: {user.win_rate:.1f}%
 
-            {EMOJI['play']} <b>Что хотите сделать?</b>
+{EMOJI['play']} <b>Что хотите сделать?</b>
 
-            Используйте команды:
-            /play - Начать новую игру
-            /matches - Мои матчи
-            /help - Правила игры"""
+Используйте команды:
+/play — Начать новую игру
+/matches — Мои матчи
+/help — Правила игры"""
 
-    # Создаем клавиатуру
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-
                 InlineKeyboardButton(
                     text=f"{EMOJI['play']} Играть",
                     callback_data="play_game"
@@ -104,7 +107,6 @@ async def command_start(message: Message, state: FSMContext):
         ]
     )
 
-    # Отправляем приветственное сообщение
     await message.answer(
         welcome_text,
         reply_markup=keyboard,
@@ -114,16 +116,18 @@ async def command_start(message: Message, state: FSMContext):
 
 @router.message(Command("help"))
 async def command_help(message: Message):
-    """Обработчик команды /help"""
+    """
+    Обработчик команды /help — список основных команд и краткая справка.
+    """
     help_text = f"""{EMOJI['help']} <b>Помощь по командам:</b>
 
 {EMOJI['play']} <b>Основные команды:</b>
-/start - Главное меню
-/help - Эта справка
-/profile - Ваш профиль
-/team - Управление командой
-/play - Найти матч
-/rules - Правила игры
+/start — Главное меню
+/help — Эта справка
+/profile — Ваш профиль
+/team — Управление командой
+/play — Найти матч
+/rules — Правила игры
 
 {EMOJI['info']} <b>Как начать играть?</b>
 1. Используйте /team для создания команды из 16 игроков
@@ -132,9 +136,9 @@ async def command_help(message: Message):
 4. Используйте карточки «Свисток» для влияния на игру
 
 {EMOJI['rules']} <b>Типы ставок:</b>
-• Чет/Нечет - даёт «отбития»
-• 1-3/4-6 (Меньше/Больше) - даёт «передачи»
-• Точное число - даёт «голы»
+• Чет/Нечет — даёт «отбития»
+• 1-3/4-6 (Меньше/Больше) — даёт «передачи»
+• Точное число — даёт «голы»
 
 {EMOJI['card']} <b>Карточки «Свисток»:</b>
 В колоде 40 карточек с различными эффектами.
@@ -148,7 +152,9 @@ async def command_help(message: Message):
 
 @router.message(Command("rules"))
 async def command_rules(message: Message):
-    """Обработчик команды /rules (краткие правила)"""
+    """
+    Обработчик команды /rules — краткие правила игры + кнопки перехода.
+    """
     rules_text = f"""{EMOJI['rules']} <b>Краткие правила FINAL 4:</b>
 
 {EMOJI['target']} <b>Цель игры:</b>
@@ -210,11 +216,12 @@ async def command_rules(message: Message):
 
 @router.message(Command("profile"))
 async def command_profile(message: Message):
-    """Обработчик команды /profile"""
+    """
+    Обработчик команды /profile — отображение профиля игрока.
+    """
     user_id = message.from_user.id
 
     async with AsyncSessionLocal() as session:
-        # ✅ ИСПРАВЛЕНО: используем хелпер
         user, _ = await get_user_with_team(session, user_id)
 
         if not user:
@@ -238,7 +245,6 @@ async def command_profile(message: Message):
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-
                     InlineKeyboardButton(
                         text=f"{EMOJI['play']} Играть",
                         callback_data="play_game"
@@ -250,67 +256,38 @@ async def command_profile(message: Message):
         await message.answer(profile_text, reply_markup=keyboard, parse_mode='HTML')
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-@router.callback_query(F.data == "list_players")
-async def list_players_callback(callback_query):
-    user_id = callback_query.from_user.id
-
-    async with AsyncSessionLocal() as session:
-        # Сначала получаем пользователя
-        result = await session.execute(
-            select(User).where(User.telegram_id == user_id)
-        )
-        user = result.scalar_one_or_none()
-
-        if not user:
-            await callback_query.answer("Пользователь не найден")
-            return
-
-
-
-
-
-
-
-
-
-
-
 @router.callback_query(F.data == "show_profile")
-async def show_profile_callback(callback_query):
-    """Обработчик кнопки 'Профиль'"""
-    await callback_query.answer()
-    await command_profile(callback_query.message)
+async def show_profile_callback(callback: CallbackQuery):
+    """
+    Callback кнопки «Профиль» — вызывает отображение профиля.
+    """
+    await callback.answer()
+    await command_profile(callback.message)
 
 
 @router.callback_query(F.data == "show_help")
-async def show_help_callback(callback_query):
-    """Обработчик кнопки 'Помощь'"""
-    await callback_query.answer()
-    await command_help(callback_query.message)
+async def show_help_callback(callback: CallbackQuery):
+    """
+    Callback кнопки «Помощь» — вызывает справку по командам.
+    """
+    await callback.answer()
+    await command_help(callback.message)
 
 
 @router.callback_query(F.data == "show_rules")
-async def show_rules_callback(callback_query):
-    """Обработчик кнопки 'Правила'"""
-    await callback_query.answer()
-    await command_rules(callback_query.message)
+async def show_rules_callback(callback: CallbackQuery):
+    """
+    Callback кнопки «Правила» — вызывает краткие правила.
+    """
+    await callback.answer()
+    await command_rules(callback.message)
 
 
 @router.callback_query(F.data == "detailed_rules")
-async def detailed_rules_callback(callback_query):
-    """Подробные правила игры"""
+async def detailed_rules_callback(callback: CallbackQuery):
+    """
+    Callback кнопки «Подробная справка» — полные правила игры.
+    """
     rules_text = f"""{EMOJI['rules']} <b>ПОЛНЫЕ ПРАВИЛА FINAL 4</b>
 
 {EMOJI['target']} <b>Цель игры:</b> Победить соперника.
@@ -407,31 +384,28 @@ async def detailed_rules_callback(callback_query):
         ]
     )
 
-    await callback_query.message.edit_text(rules_text, reply_markup=keyboard, parse_mode='HTML')
+    await callback.message.edit_text(rules_text, reply_markup=keyboard, parse_mode='HTML')
+    await callback.answer()
 
 
 @router.callback_query(F.data == "play_game")
-async def play_game_callback(callback_query):
-    """Обработчик кнопки 'Играть'"""
-    user_id = callback_query.from_user.id
+async def play_game_callback(callback: CallbackQuery):
+    """
+    Callback кнопки «Играть» — показывает выбор типа матча.
+    """
+    user_id = callback.from_user.id
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(
-
             select(User).where(User.telegram_id == user_id)
-
         )
-
         user = result.scalar_one_or_none()
 
         if not user:
-            await callback_query.answer("Сначала зарегистрируйтесь")
+            await callback.answer("Сначала зарегистрируйтесь")
             return
 
         text = f"{EMOJI['play']} <b>Выберите тип игры:</b>"
-
-
-        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
@@ -462,14 +436,15 @@ async def play_game_callback(callback_query):
             ]
         )
 
-        await callback_query.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
 
-    await callback_query.answer()
+    await callback.answer()
 
 
 @router.callback_query(F.data == "main_menu")
-async def main_menu_callback(callback_query: CallbackQuery, state: FSMContext):
-    """Возврат в главное меню"""
-    await callback_query.answer()
-    # ✅ Передаем state вместо bot
-    await command_start(callback_query.message, state)
+async def main_menu_callback(callback: CallbackQuery, state: FSMContext):
+    """
+    Callback кнопки «Назад» / «Главное меню» — возвращает в стартовое меню.
+    """
+    await callback.answer()
+    await command_start(callback.message, state)

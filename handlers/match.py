@@ -2,33 +2,50 @@
 """
 Обработчики игрового процесса Final 4 с интеграцией BetTracker и BetValidator.
 """
-import random
-import logging
-logger = logging.getLogger(__name__)
-from sqlalchemy import select, and_, or_, func
-from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
-from aiogram.fsm.context import FSMContext
-from aiogram.filters import Command, StateFilter
 
-from sqlalchemy.orm import selectinload
-from bot.config import BOT_TELEGRAM_ID
-from models.user import User
-from models.match import Match, MatchStatus, MatchType
-from models.bet import Bet, BetType as ModelBetType, BetStatus
-from models.bet_tracker import BetTracker, BetType
-from services.game_manager import game_manager
-from services.bet_validator import bet_validator
-from bot.database import AsyncSessionLocal
-from utils.emoji import EMOJI
 import asyncio
+import json
+import logging
+import random
 from typing import Dict, List
+
+from aiogram import F, Router
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.handlers import message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy.orm import selectinload
+
+from bot.config import BOT_TELEGRAM_ID
+from bot.database import AsyncSessionLocal
+from core import Final4BotAI
+from core.game_utils import calculate_actions
+from models.bet import Bet, BetStatus, BetType as ModelBetType
+from models.bet_tracker import BetTracker, BetType
+from models.match import Match, MatchStatus, MatchType
+from models.user import User
+from services.bet_validator import bet_validator
+from services.game_manager import game_manager
+from utils.emoji import EMOJI
+
+logger = logging.getLogger(__name__)
 
 router = Router(name="match")
 
 
-# Состояния FSM для матча
 class MatchStates:
+    """
+    Состояния Finite State Machine для управления игровым процессом матча.
+
+    Эти константы используются в FSMContext для контроля этапов:
+    - ожидание ставки
+    - выбор карточки
+    - активный матч
+    - выбор игроков для дополнительного времени
+    - ожидание второй ставки
+    """
     WAITING_FOR_BET = "waiting_for_bet"
     WAITING_FOR_CARD = "waiting_for_card"
     IN_MATCH = "in_match"
@@ -36,24 +53,22 @@ class MatchStates:
     WAITING_FOR_SECOND_BET = "waiting_for_second_bet"
 
 
-# handlers/match.py - исправленная функция match_type_vs_bot
-
-from bot.config import BOT_TELEGRAM_ID  # Добавляем импорт
-import random  # Для создания команды бота
-
-
 @router.callback_query(F.data == "match_type_vs_bot")
 async def match_type_vs_bot(callback: CallbackQuery, state: FSMContext):
-    """Создание матча против бота - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+    """
+    Создание матча против бота.
+
+    Получает пользователя, создаёт (при необходимости) пользователя-бота,
+    генерирует стандартные команды по 16 игроков для обоих,
+    создаёт запись Match с типом VS_BOT и показывает клавиатуру начала игры.
+    """
     print(f"DEBUG: callback.from_user.id = {callback.from_user.id}")
     user_id = callback.from_user.id
     first_name = callback.from_user.first_name or "Игрок"
 
-    # Динамический ID бота
-    bot_telegram_id = callback.bot.id  # ← ИСПРАВЛЕНИЕ ЗДЕСЬ
+    bot_telegram_id = callback.bot.id
 
     async with AsyncSessionLocal() as session:
-        # 1. Получаем пользователя
         result = await session.execute(
             select(User).where(User.telegram_id == user_id)
         )
@@ -63,28 +78,22 @@ async def match_type_vs_bot(callback: CallbackQuery, state: FSMContext):
             await callback.answer("Сначала зарегистрируйтесь через /start")
             return
 
-        # 2. Находим или создаем пользователя-бота
         bot_result = await session.execute(
-            select(User).where(User.telegram_id == bot_telegram_id)  # ← ИСПРАВЛЕНИЕ ЗДЕСЬ
+            select(User).where(User.telegram_id == bot_telegram_id)
         )
         bot_user = bot_result.scalar_one_or_none()
 
         if not bot_user:
-            # Создаем пользователя-бота
             bot_user = User(
-                telegram_id=bot_telegram_id,  # ← ИСПРАВЛЕНИЕ ЗДЕСЬ
+                telegram_id=bot_telegram_id,
                 username='final4_bot',
                 first_name='🤖 Бот'
             )
             session.add(bot_user)
             await session.flush()
 
-        # ... остальной код без изменений ...
-
-        # 3. Создаем стандартную команду игрока (16 футболистов)
         player_players = []
 
-        # Вратарь (1)
         player_players.append({
             'id': 1,
             'position': 'GK',
@@ -92,7 +101,6 @@ async def match_type_vs_bot(callback: CallbackQuery, state: FSMContext):
             'number': 1
         })
 
-        # Защитники (5)
         for i in range(5):
             player_players.append({
                 'id': 2 + i,
@@ -101,7 +109,6 @@ async def match_type_vs_bot(callback: CallbackQuery, state: FSMContext):
                 'number': 2 + i
             })
 
-        # Полузащитники (6)
         for i in range(6):
             player_players.append({
                 'id': 7 + i,
@@ -110,7 +117,6 @@ async def match_type_vs_bot(callback: CallbackQuery, state: FSMContext):
                 'number': 7 + i
             })
 
-        # Нападающие (4)
         for i in range(4):
             player_players.append({
                 'id': 13 + i,
@@ -119,10 +125,8 @@ async def match_type_vs_bot(callback: CallbackQuery, state: FSMContext):
                 'number': 13 + i
             })
 
-        # 4. Создаем команду бота (16 футболистов)
         bot_players = []
 
-        # Вратарь (1)
         bot_players.append({
             'id': 1,
             'position': 'GK',
@@ -130,7 +134,6 @@ async def match_type_vs_bot(callback: CallbackQuery, state: FSMContext):
             'number': 1
         })
 
-        # Защитники (5)
         for i in range(5):
             bot_players.append({
                 'id': 2 + i,
@@ -139,7 +142,6 @@ async def match_type_vs_bot(callback: CallbackQuery, state: FSMContext):
                 'number': 2 + i
             })
 
-        # Полузащитники (6)
         for i in range(6):
             bot_players.append({
                 'id': 7 + i,
@@ -148,7 +150,6 @@ async def match_type_vs_bot(callback: CallbackQuery, state: FSMContext):
                 'number': 7 + i
             })
 
-        # Нападающие (4)
         for i in range(4):
             bot_players.append({
                 'id': 13 + i,
@@ -157,22 +158,20 @@ async def match_type_vs_bot(callback: CallbackQuery, state: FSMContext):
                 'number': 13 + i
             })
 
-        # 5. Создаем матч с ботом
         match = Match(
             player1_id=user.id,
-            player2_id=bot_user.id,  # Используем реальный ID бота из БД
+            player2_id=bot_user.id,
             player1_team_data={'players': player_players},
             player2_team_data={'players': bot_players},
             match_type=MatchType.VS_BOT,
             status=MatchStatus.CREATED,
             current_turn=1,
-            bet_tracker=BetTracker()  # Инициализируем трекер
+            bet_tracker=BetTracker()
         )
 
         session.add(match)
         await session.commit()
 
-        # 6. Показываем успешное создание
         text = f"""🎮 <b>Матч против бота создан!</b>
 
 ID матча: <code>{match.id}</code>
@@ -208,28 +207,30 @@ ID матча: <code>{match.id}</code>
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
         await callback.answer()
 
-        # Сохраняем ID матча в состоянии
         await state.update_data(match_id=match.id)
+
 
 @router.message(Command("play"))
 async def command_play(message: Message):
-    """Начать поиск матча"""
+    """
+    Команда /play — показывает меню выбора типа матча.
+
+    Проверяет пользователя через GameManager и выводит кнопки:
+    против случайного соперника, против бота, турнир.
+    """
     user_id = message.from_user.id
 
     async with AsyncSessionLocal() as session:
-        # Проверяем пользователя
         user = await session.get(User, user_id)
         if not user:
             await message.answer("Сначала зарегистрируйтесь через /start")
             return
 
-        # Используем GameManager для проверки возможности начала матча
         can_start, reason = await game_manager.can_start_match(session, user_id)
         if not can_start:
             await message.answer(f"❌ {reason}")
             return
 
-        # Показываем меню выбора матча
         text = f"""{EMOJI['play']} <b>Найти матч</b>
 
 {EMOJI['rating']} <b>Ваш рейтинг:</b> {user.rating}
@@ -285,11 +286,14 @@ async def command_play(message: Message):
 
 @router.callback_query(F.data == "match_type_vs_random")
 async def match_type_vs_random(callback: CallbackQuery, state: FSMContext):
-    """Создание матча против случайного соперника"""
+    """
+    Создание матча против случайного соперника.
+
+    Создаёт запись Match со статусом WAITING и запускает фоновый поиск соперника.
+    """
     user_id = callback.from_user.id
 
     async with AsyncSessionLocal() as session:
-        # Создаем матч
         match = Match(
             player1_id=user_id,
             match_type=MatchType.VS_RANDOM,
@@ -323,18 +327,21 @@ async def match_type_vs_random(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
         await callback.answer()
 
-        # Запускаем поиск соперника в фоне
         asyncio.create_task(search_opponent(match.id, callback.bot))
 
 
 @router.callback_query(F.data.startswith("start_match_"))
 async def start_match(callback: CallbackQuery, state: FSMContext):
-    """Начало матча"""
+    """
+    Начало матча (переход из CREATED в IN_PROGRESS).
+
+    Устанавливает статус, текущего игрока, сохраняет данные в FSM
+    и вызывает show_turn для первого хода.
+    """
     match_id = int(callback.data.split("_")[2])
-    telegram_id = callback.from_user.id  # Переименовываем для ясности
+    telegram_id = callback.from_user.id
 
     async with AsyncSessionLocal() as session:
-        # 1. Получаем пользователя из БД по telegram_id
         user_result = await session.execute(
             select(User).where(User.telegram_id == telegram_id)
         )
@@ -344,15 +351,13 @@ async def start_match(callback: CallbackQuery, state: FSMContext):
             await callback.answer("Пользователь не найден")
             return
 
-        # 2. Получаем матч
         match = await session.get(Match, match_id)
 
         if not match:
             await callback.answer("Матч не найден")
             return
 
-        # 3. Проверяем участие пользователя в матче (используем user.id, а не telegram_id)
-        if not match.is_player_in_match(user.id):  # user.id, а не telegram_id
+        if not match.is_player_in_match(user.id):
             await callback.answer("Вы не участник этого матча")
             return
 
@@ -360,14 +365,12 @@ async def start_match(callback: CallbackQuery, state: FSMContext):
             await callback.answer("Матч уже начат")
             return
 
-        # 4. Начинаем матч
         match.status = MatchStatus.IN_PROGRESS
         match.started_at = func.now()
         match.current_player_turn = "player1"
 
         await session.commit()
 
-        # 5. Сохраняем данные в состоянии
         await state.update_data(
             match_id=match_id,
             current_turn=1,
@@ -376,39 +379,40 @@ async def start_match(callback: CallbackQuery, state: FSMContext):
         )
         await state.set_state(MatchStates.IN_MATCH)
 
-        # 6. Показываем первый ход
         await show_turn(callback, state, match_id, 1)
 
     await callback.answer()
 
 
 async def show_turn(callback: CallbackQuery, state: FSMContext, match_id: int, turn: int):
-    """Показывает интерфейс хода с учетом ограничений"""
+    """
+    Отображение интерфейса текущего хода игрока.
+
+    Получает доступных игроков через GameManager, формирует текст и клавиатуру.
+    Если нет доступных игроков — вызывает обработку дополнительного времени.
+    """
     async with AsyncSessionLocal() as session:
         match = await session.get(Match, match_id)
-        telegram_id = callback.from_user.id  # ← ИЗМЕНЕНО: callback.from_user.id вместо message.from_user.id
+        telegram_id = callback.from_user.id
 
-        # 1. Получаем пользователя из БД
         user_result = await session.execute(
             select(User).where(User.telegram_id == telegram_id)
         )
         user = user_result.scalar_one_or_none()
 
         if not user:
-            await callback.message.answer("Пользователь не найден")  # ← ИЗМЕНЕНО
+            await message.answer("Пользователь не найден")
             return
 
         user_db_id = user.id
 
         if not match or not match.is_player_in_match(user_db_id):
-            await callback.message.answer("Ошибка доступа к матчу")  # ← ИЗМЕНЕНО
+            await message.answer("Ошибка доступа к матчу")
             return
 
-
-        # Проверяем, ход ли игрока
-        current_user_id = match.get_current_user_id()  # Этот метод возвращает id из users
+        current_user_id = match.get_current_user_id()
         print(f"DEBUG: current_user_id = {current_user_id}, user_db_id = {user_db_id}")
-        if current_user_id != user_db_id:  # Сравниваем с user_db_id
+        if current_user_id != user_db_id:
             text = f"""{EMOJI['wait']} <b>Ожидание хода соперника...</b>
 
 Матч #{match.id}
@@ -419,23 +423,19 @@ async def show_turn(callback: CallbackQuery, state: FSMContext, match_id: int, t
             await message.answer(text, parse_mode='HTML')
             return
 
-        # Ход игрока
-        player_number = match.get_player_number(user_db_id)  # Используем user_db_id
-        team_data = match.get_player_team_data(user_db_id)  # Используем user_db_id
+        player_number = match.get_player_number(user_db_id)
+        team_data = match.get_player_team_data(user_db_id)
 
         if not team_data:
             await message.answer("Ошибка: данные команды не найдены")
             return
 
-        # Получаем доступных игроков через GameManager
-        # GameManager.get_available_players тоже нужно исправить, но пока передаем user_db_id
         available_players = await game_manager.get_available_players(
-            session, match_id, user_db_id  # Передаем user_db_id, а не telegram_id
+            session, match_id, user_db_id
         )
 
         if not available_players:
-            # Нет доступных игроков - переходим к ДВ или завершаем
-            await handle_no_available_players(callback.message, match, state)
+            await handle_no_available_players(message, match, state)
             return
 
         text = f"""{EMOJI['dice']} <b>Ваш ход!</b>
@@ -457,16 +457,14 @@ async def show_turn(callback: CallbackQuery, state: FSMContext, match_id: int, t
 Голы: DF ({match.bet_tracker.get_goal_quota_left('DF')}/1), 
       MF ({match.bet_tracker.get_goal_quota_left('MF')}/3), 
       FW ({match.bet_tracker.get_goal_quota_left('FW')}/4)
-Чет/нечет: {match.bet_tracker.get_remaining_even_odd()}/6 игроков"""
+Чет/нечет: {match.bet_tracker.get_remaining_EVEN_ODD()}/6 игроков"""
 
-        # Показываем кнопки выбора игрока
         keyboard_buttons = []
-        for player in available_players[:8]:  # Ограничиваем показ
+        for player in available_players[:8]:
             emoji = get_position_emoji(player.get('position', 'GK'))
             player_name = player.get('name', f"Игрок {player.get('id')}")
             player_number = player.get('number', '?')
 
-            # Добавляем информацию о доступных ставках
             available_types = match.bet_tracker.get_available_bet_types(
                 player['id'], player.get('position', 'GK'), False
             )
@@ -481,13 +479,16 @@ async def show_turn(callback: CallbackQuery, state: FSMContext, match_id: int, t
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
 
-        await callback.message.answer(text, reply_markup=keyboard, parse_mode='HTML')  # ← ИЗМЕНЕНО
+        await callback.message.answer(text, reply_markup=keyboard, parse_mode='HTML')
 
 
 async def handle_no_available_players(message: Message, match: Match, state: FSMContext):
-    """Обрабатывает ситуацию, когда нет доступных игроков"""
+    """
+    Обработка ситуации, когда нет доступных игроков для хода.
+
+    Если основное время завершено — переходит к выбору игроков для дополнительного времени.
+    """
     if not match.is_extra_time and match.current_turn >= 11:
-        # Завершаем основное время, переходим к ДВ
         text = f"""{EMOJI['clock']} <b>Основное время завершено!</b>
 
 Матч #{match.id}
@@ -502,24 +503,26 @@ async def handle_no_available_players(message: Message, match: Match, state: FSM
             selecting_for_match=match.id
         )
 
-        # Показываем выбор игроков для ДВ
         await show_extra_time_selection(message, match.id, match.get_current_user_id())
 
     else:
-        # Ошибка: должно быть доступно
         await message.answer("Ошибка: нет доступных игроков для хода. Обратитесь к администратору.")
 
 
 @router.callback_query(F.data.startswith("select_player_"))
 async def select_player(callback: CallbackQuery, state: FSMContext):
-    """Выбор игрока для ставки с проверкой через BetValidator"""
+    """
+    Выбор игрока для ставки.
+
+    Проверяет валидность через GameManager, сохраняет выбранного игрока в состоянии
+    и вызывает выбор типа ставки.
+    """
     parts = callback.data.split("_")
     match_id = int(parts[2])
     player_id = int(parts[3])
-    telegram_id = callback.from_user.id  # ← Переименовываем для ясности
+    telegram_id = callback.from_user.id
 
     async with AsyncSessionLocal() as session:
-        # 1. Получаем пользователя из БД
         user_result = await session.execute(
             select(User).where(User.telegram_id == telegram_id)
         )
@@ -529,31 +532,24 @@ async def select_player(callback: CallbackQuery, state: FSMContext):
             await callback.answer("Пользователь не найден")
             return
 
-        user_db_id = user.id  # ← Используем этот ID
+        user_db_id = user.id
 
-        # 2. Получаем матч
         match = await session.get(Match, match_id)
 
-        if not match or match.get_current_user_id() != user_db_id:  # ← Используем user_db_id
+        if not match or match.get_current_user_id() != user_db_id:
             await callback.answer("Сейчас не ваш ход")
             return
 
-        # 3. Проверяем выбор игрока через GameManager (передаем user_db_id)
-        is_valid, message = await game_manager.validate_player_selection(
-            session, match_id, user_db_id, player_id  # ← Используем user_db_id
+        is_valid, message_text = await game_manager.validate_player_selection(
+            session, match_id, user_db_id, player_id
         )
 
         if not is_valid:
-            await callback.answer(f"❌ {message}")
+            await callback.answer(f"❌ {message_text}")
             return
 
-        # 4. Получаем информацию об игроке ИЗ МАТЧА (а не из user.team_data)
-        print(
-            f"DEBUG select_player: user_db_id={user_db_id}, player1_id={match.player1_id}, "
-            f"player2_id={match.player2_id}")
-        team_data = match.get_player_team_data(user_db_id)  # ← Используем user_db_id
+        team_data = match.get_player_team_data(user_db_id)
 
-        print(f"DEBUG: team_data={team_data}")
         if not team_data:
             await callback.answer("Ошибка: данные команды не найдены")
             return
@@ -565,24 +561,25 @@ async def select_player(callback: CallbackQuery, state: FSMContext):
             await callback.answer("Игрок не найден")
             return
 
-        # 5. Сохраняем выбранного игрока в состоянии
         await state.update_data(
             selected_player_id=player_id,
             selected_player_position=player.get('position', 'GK'),
             selected_player_name=player.get('name', f"Игрок {player_id}"),
-            current_bet_number=1  # Первая ставка
+            current_bet_number=1
         )
 
-        # 6. Показываем выбор типа ставки
         await show_bet_type_selection(callback.message, match, player)
 
     await callback.answer()
 
-# В handlers/match.py, перед функцией extra_time_done добавьте:
 
 @router.callback_query(F.data.startswith("select_extra_"))
 async def select_extra_player(callback: CallbackQuery, state: FSMContext):
-    """Выбор игрока для дополнительного времени"""
+    """
+    Выбор игроков для дополнительного времени (toggle).
+
+    Добавляет/удаляет игрока из списка, обновляет клавиатуру и состояние.
+    """
     parts = callback.data.split("_")
     match_id = int(parts[2])
     player_id = int(parts[3])
@@ -594,41 +591,31 @@ async def select_extra_player(callback: CallbackQuery, state: FSMContext):
             await callback.answer("Ошибка доступа к матчу")
             return
 
-        # Проверяем, что находимся в состоянии выбора ДВ
         current_state = await state.get_state()
         if current_state != MatchStates.SELECTING_EXTRA_TIME_PLAYERS:
             await callback.answer("Сейчас не время выбора игроков для ДВ")
             return
 
-        # Получаем текущий список выбранных игроков
         state_data = await state.get_data()
         selected = state_data.get('extra_time_selected', [])
 
-        # Проверяем, не выбран ли уже этот игрок
         if player_id in selected:
-            # Убираем из выбранных
             selected.remove(player_id)
             action_emoji = "➖"
             action_text = "удален"
         else:
-            # Проверяем, можно ли добавить (максимум 5)
             if len(selected) >= 5:
                 await callback.answer("Можно выбрать только 5 игроков")
                 return
-
-            # Добавляем игрока
             selected.append(player_id)
             action_emoji = "➕"
             action_text = "выбран"
 
-        # Обновляем состояние
         await state.update_data(extra_time_selected=selected)
 
-        # Получаем информацию об игроке
         user = await session.get(User, user_id)
         player_name = f"Игрок #{player_id}"
         if user and user.team_data:
-            import json
             team_data = json.loads(user.team_data) if isinstance(user.team_data, str) else user.team_data
             players = team_data.get('players', [])
             player = next((p for p in players if p.get('id') == player_id), None)
@@ -637,7 +624,6 @@ async def select_extra_player(callback: CallbackQuery, state: FSMContext):
 
         await callback.answer(f"{action_emoji} {player_name} {action_text} ({len(selected)}/5)")
 
-        # Обновляем сообщение с новой клавиатурой
         try:
             await update_extra_time_keyboard(callback.message, match_id, user_id, selected)
         except Exception as e:
@@ -646,14 +632,16 @@ async def select_extra_player(callback: CallbackQuery, state: FSMContext):
 
 
 async def update_extra_time_keyboard(message: Message, match_id: int, user_id: int, selected: List[int]):
-    """Обновляет клавиатуру выбора игроков ДВ"""
+    """
+    Обновление клавиатуры выбора игроков для дополнительного времени.
+
+    Перестраивает кнопки с учётом текущего выбора.
+    """
     async with AsyncSessionLocal() as session:
-        # Получаем игроков для ДВ
         extra_players = await game_manager.get_extra_time_players(
             session, match_id, user_id
         )
 
-        # Создаем новую клавиатуру
         keyboard_buttons = []
 
         for player in extra_players:
@@ -661,7 +649,6 @@ async def update_extra_time_keyboard(message: Message, match_id: int, user_id: i
             player_name = player.get('name', f"Игрок {player.get('id')}")
             player_num = player.get('number', '?')
 
-            # Проверяем, выбран ли игрок
             is_selected = player['id'] in selected
             prefix = "✅ " if is_selected else ""
 
@@ -672,7 +659,6 @@ async def update_extra_time_keyboard(message: Message, match_id: int, user_id: i
                 )
             ])
 
-        # Кнопка готово с обновленным счетчиком
         keyboard_buttons.append([
             InlineKeyboardButton(
                 text=f"{EMOJI['check']} Готово ({len(selected)}/5)",
@@ -680,7 +666,6 @@ async def update_extra_time_keyboard(message: Message, match_id: int, user_id: i
             )
         ])
 
-        # Кнопка отмены
         keyboard_buttons.append([
             InlineKeyboardButton(
                 text=f"{EMOJI['cancel']} Отмена",
@@ -690,84 +675,74 @@ async def update_extra_time_keyboard(message: Message, match_id: int, user_id: i
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
 
-        # Обновляем только клавиатуру
         await message.edit_reply_markup(reply_markup=keyboard)
 
 
-# Дальше продолжается существующий код extra_time_done...
-
 @router.callback_query(F.data.startswith("extra_done_"))
 async def extra_time_done(callback: CallbackQuery, state: FSMContext):
-    """Завершение выбора игроков для ДВ"""
+    """
+    Завершение выбора игроков для дополнительного времени.
+
+    Сохраняет выбранных игроков в матч, проверяет готовность обоих игроков
+    и запускает дополнительное время при необходимости.
+    """
     match_id = int(callback.data.split("_")[2])
     user_id = callback.from_user.id
 
     async with AsyncSessionLocal() as session:
-        # Получаем матч
         match = await session.get(Match, match_id)
         if not match or not match.is_player_in_match(user_id):
             await callback.answer("Ошибка доступа к матчу")
             return
 
-        # Получаем выбранных игроков из состояния
         state_data = await state.get_data()
         selected = state_data.get('extra_time_selected', [])
 
-        # Проверяем количество
         if len(selected) != 5:
             await callback.answer(f"Нужно выбрать ровно 5 игроков (выбрано: {len(selected)})")
             return
 
-        # Проверяем выбор через GameManager
-        is_valid, message = await game_manager.validate_extra_time_selection(
+        is_valid, message_text = await game_manager.validate_extra_time_selection(
             session, match_id, user_id, selected
         )
 
         if not is_valid:
-            await callback.answer(f"❌ {message}")
+            await callback.answer(f"❌ {message_text}")
             return
 
-        # Сохраняем выбранных игроков в матч
         player_key = 'player1' if user_id == match.player1_id else 'player2'
 
-        # Инициализируем словарь если нужно
         if not match.extra_time_players:
             match.extra_time_players = {}
 
         match.extra_time_players[player_key] = selected
         await session.commit()
 
-        # Проверяем, выбрали ли оба игрока
         both_selected = (
-                match.extra_time_players.get('player1') and
-                match.extra_time_players.get('player2') and
-                len(match.extra_time_players.get('player1', [])) == 5 and
-                len(match.extra_time_players.get('player2', [])) == 5
+            match.extra_time_players.get('player1') and
+            match.extra_time_players.get('player2') and
+            len(match.extra_time_players.get('player1', [])) == 5 and
+            len(match.extra_time_players.get('player2', [])) == 5
         )
 
         if both_selected:
-            # Оба игрока выбрали - начинаем ДВ
-            # Определяем, чей ход начинать (тот, кто не начинал основной матч)
             if match.current_player_turn == "player1":
                 match.current_player_turn = "player2"
             else:
                 match.current_player_turn = "player1"
 
-            # Обновляем трекер
             tracker = match.bet_tracker
-            tracker.start_extra_time(selected)  # Используем выбор текущего игрока
+            tracker.start_extra_time(selected)
             match.bet_tracker = tracker
 
             match.is_extra_time = True
-            match.current_turn = 1  # Сбрасываем счетчик ходов для ДВ
+            match.current_turn = 1
 
             await session.commit()
 
-            # Сбрасываем состояние
             await state.set_state(MatchStates.IN_MATCH)
             await state.update_data(extra_time_selected=[])
 
-            # Уведомляем обоих игроков
             text = f"""{EMOJI['clock']} <b>Дополнительное время начато!</b>
 
 Матч #{match.id}
@@ -779,7 +754,6 @@ async def extra_time_done(callback: CallbackQuery, state: FSMContext):
 
             await callback.message.edit_text(text, parse_mode='HTML')
 
-            # Показываем первый ход ДВ
             current_user_id = match.get_current_user_id()
             if current_user_id == user_id:
                 await show_turn(callback.message, state, match_id, 1)
@@ -790,7 +764,6 @@ async def extra_time_done(callback: CallbackQuery, state: FSMContext):
                 )
 
         else:
-            # Ждем второго игрока
             opponent_id = match.player2_id if user_id == match.player1_id else match.player1_id
             opponent_name = get_player_name(match, opponent_id)
 
@@ -801,15 +774,16 @@ async def extra_time_done(callback: CallbackQuery, state: FSMContext):
 """
 
             await callback.message.edit_text(text, parse_mode='HTML')
-            await state.set_state(None)  # Сбрасываем состояние, ждем второго игрока
+            await state.set_state(None)
 
         await callback.answer("Выбор сохранен!")
 
 
-
 @router.callback_query(F.data.startswith("cancel_extra_"))
 async def cancel_extra_selection(callback: CallbackQuery, state: FSMContext):
-    """Отмена выбора игроков для ДВ"""
+    """
+    Отмена выбора игроков для дополнительного времени.
+    """
     match_id = int(callback.data.split("_")[2])
     user_id = callback.from_user.id
 
@@ -819,10 +793,8 @@ async def cancel_extra_selection(callback: CallbackQuery, state: FSMContext):
             await callback.answer("Ошибка доступа")
             return
 
-        # Сбрасываем состояние
         await state.clear()
 
-        # Возвращаемся к просмотру матча
         text = f"""{EMOJI['cancel']} <b>Выбор игроков отменен</b>
 
 Матч #{match.id}
@@ -835,14 +807,17 @@ async def cancel_extra_selection(callback: CallbackQuery, state: FSMContext):
 
 
 async def show_bet_type_selection(message: Message, match: Match, player: Dict):
-    """Показывает выбор типа ставки с учетом ограничений"""
+    """
+    Показ выбора типа первой ставки для выбранного игрока.
+
+    Использует GameManager для получения доступных типов ставок.
+    """
     player_id = player['id']
     position = player.get('position', 'GK')
     player_name = player.get('name', f"Игрок {player_id}")
 
-    # Получаем доступные типы ставок через GameManager
     available_bets = await game_manager.get_available_bet_types(
-        match, player_id, position, False  # Первая ставка
+        match, player_id, position, False
     )
 
     if not available_bets:
@@ -856,14 +831,12 @@ async def show_bet_type_selection(message: Message, match: Match, player: Dict):
 
 {EMOJI['rules']} <b>Доступные ставки:</b>"""
 
-    # Создаем кнопки - ИСПРАВЛЕННЫЙ КОД
     keyboard_buttons = []
-    for bet_type_str, bet_name, values in available_bets:  # Изменено распаковку!
-        # Для каждой ставки показываем возможные значения
-        if bet_type_str == "even_odd":  # Используем строки, а не BetType
+    for bet_type_str, bet_name, values in available_bets:
+        if bet_type_str == "EVEN_ODD":
             keyboard_buttons.append([
                 InlineKeyboardButton(
-                    text=f"🔢 {bet_name} (чёт/нечёт)",
+                    text=f"🔢 {bet_name} (чет/нечет)",
                     callback_data=f"bet_type_{match.id}_{player_id}_{bet_type_str}"
                 )
             ])
@@ -888,21 +861,23 @@ async def show_bet_type_selection(message: Message, match: Match, player: Dict):
 
 @router.callback_query(F.data.startswith("bet_type_"))
 async def select_bet_type(callback: CallbackQuery, state: FSMContext):
-    """Выбор типа ставки"""
+    """
+    Выбор типа ставки (первая или вторая).
+
+    Валидирует через GameManager и переходит к выбору значения ставки.
+    """
     parts = callback.data.split("_")
 
-    # ИСПРАВЛЕНИЕ: Правильно извлекаем bet_type_str
     if len(parts) >= 5:
         match_id = int(parts[2])
         player_id = int(parts[3])
-        bet_type_str = "_".join(parts[4:])  # Объединяем всё после player_id
+        bet_type_str = "_".join(parts[4:])
     else:
         await callback.answer("❌ Ошибка в данных")
         return
 
     telegram_id = callback.from_user.id
     async with AsyncSessionLocal() as session:
-        # 1. Получаем пользователя из БД
         user_result = await session.execute(
             select(User).where(User.telegram_id == telegram_id)
         )
@@ -912,28 +887,24 @@ async def select_bet_type(callback: CallbackQuery, state: FSMContext):
             await callback.answer("Пользователь не найден")
             return
 
-        user_db_id = user.id  # ← Используем этот ID
+        user_db_id = user.id
 
-        # 2. Получаем матч
         match = await session.get(Match, match_id)
         if not match:
             await callback.answer("Матч не найден")
             return
 
-        # 3. Получаем данные из состояния
         state_data = await state.get_data()
         current_bet_number = state_data.get('current_bet_number', 1)
 
-        # 4. Проверяем ставку через GameManager
         is_second_bet = (current_bet_number == 2)
 
-        # 5. Получаем данные игрока ИЗ МАТЧА
-        team_data = match.get_player_team_data(user_db_id)  # ← ИЗМЕНЕНО
+        team_data = match.get_player_team_data(user_db_id)
         if not team_data:
             await callback.answer("Ошибка: данные команды не найдены")
             return
 
-        team_players = team_data.get('players', [])  # ← ИЗМЕНЕНО
+        team_players = team_data.get('players', [])
         player = next((p for p in team_players if p.get('id') == player_id), None)
         if not player:
             await callback.answer("Игрок не найден")
@@ -941,22 +912,19 @@ async def select_bet_type(callback: CallbackQuery, state: FSMContext):
 
         position = player.get('position', 'GK')
 
-        # 6. Проверяем доступность типа ставки
-        is_valid, message = await game_manager.validate_bet(
+        is_valid, message_text = await game_manager.validate_bet(
             match, player_id, position, bet_type_str, "", is_second_bet
         )
 
         if not is_valid:
-            await callback.answer(f"❌ {message}")
+            await callback.answer(f"❌ {message_text}")
             return
 
-        # 7. Сохраняем тип ставки
         await state.update_data(
             selected_bet_type=bet_type_str,
             selected_player_id=player_id
         )
 
-        # 8. Показываем выбор значения ставки
         await show_bet_value_selection(
             callback.message, match_id, bet_type_str, player, is_second_bet
         )
@@ -966,7 +934,9 @@ async def select_bet_type(callback: CallbackQuery, state: FSMContext):
 
 async def show_bet_value_selection(message: Message, match_id: int, bet_type_str: str,
                                    player: Dict, is_second_bet: bool):
-    """Показывает выбор значения ставки"""
+    """
+    Показ выбора конкретного значения ставки (чет/нечет, больше/меньше, точное число).
+    """
     player_name = player.get('name', f"Игрок {player['id']}")
 
     if bet_type_str == BetType.EVEN_ODD.value:
@@ -1017,7 +987,7 @@ async def show_bet_value_selection(message: Message, match_id: int, bet_type_str
             ]
         )
 
-    else:  # goal
+    else:
         text = f"""{EMOJI['bet']} <b>Выберите число:</b>
 
 Игрок: {player_name}
@@ -1041,7 +1011,6 @@ async def show_bet_value_selection(message: Message, match_id: int, bet_type_str
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
 
-    # Добавляем информацию о номере ставки
     bet_number_text = " (вторая ставка)" if is_second_bet else " (первая ставка)"
     text += f"\n\n{EMOJI['info']} Ставка #{1 if not is_second_bet else 2}{bet_number_text}"
 
@@ -1050,12 +1019,17 @@ async def show_bet_value_selection(message: Message, match_id: int, bet_type_str
 
 @router.callback_query(F.data.startswith("bet_value_"))
 async def process_bet(callback: CallbackQuery, state: FSMContext):
-    """Обработка ставки с интеграцией BetTracker"""
+    """
+    Обработка выбранного значения ставки.
+
+    Сохраняет ставку в Bet, обновляет used_players и current_on_field,
+    показывает клавиатуру подтверждения хода.
+    """
     parts = callback.data.split("_")
     match_id = int(parts[2])
     bet_value = parts[3]
 
-    telegram_id = callback.from_user.id  # ← Переименовываем
+    telegram_id = callback.from_user.id
     state_data = await state.get_data()
 
     selected_player_id = state_data.get('selected_player_id')
@@ -1064,38 +1038,43 @@ async def process_bet(callback: CallbackQuery, state: FSMContext):
     current_bet_number = state_data.get('current_bet_number', 1)
 
     async with AsyncSessionLocal() as session:
-        # 1. Получаем пользователя из БД
-        user_result = await session.execute(
-            select(User).where(User.telegram_id == telegram_id)
-        )
-        user = user_result.scalar_one_or_none()
-
+        user = await session.execute(select(User).where(User.telegram_id == telegram_id))
+        user = user.scalar_one_or_none()
         if not user:
             await callback.answer("Пользователь не найден")
             return
 
-        user_db_id = user.id  # ← Используем этот ID
+        user_db_id = user.id
 
-        # 2. Получаем матч
         match = await session.get(Match, match_id)
+        team_data = match.get_player_team_data(user_db_id)
+        if not team_data:
+            await callback.answer("Ошибка: данные команды не найдены")
+            return
 
-        if not match or match.get_current_user_id() != user_db_id:  # ← Используем user_db_id
+        player = next(
+            (p for p in team_data.get('players', []) if p.get('id') == selected_player_id),
+            None
+        )
+        if not player:
+            await callback.answer("Игрок не найден в команде")
+            return
+
+        selected_player_name = player.get('name', f"Игрок {selected_player_id}")
+        if not match or match.get_current_user_id() != user_db_id:
             await callback.answer("Сейчас не ваш ход")
             return
 
-        # 3. Проверяем ставку через GameManager (передаем user_db_id)
         is_second_bet = (current_bet_number == 2)
-        is_valid, message = await game_manager.validate_bet(
+        is_valid, message_text = await game_manager.validate_bet(
             match, selected_player_id, selected_player_position,
             selected_bet_type, bet_value, is_second_bet
         )
-
         if not is_valid:
-            await callback.answer(f"❌ {message}")
+            await callback.answer(f"❌ {message_text}")
             return
 
-        # 4. Преобразуем строку в BetType для BetTracker
-        if selected_bet_type == "even_odd":
+        if selected_bet_type == "EVEN_ODD":
             bet_type_enum = BetType.EVEN_ODD
         elif selected_bet_type == "big_small":
             bet_type_enum = BetType.BIG_SMALL
@@ -1105,78 +1084,113 @@ async def process_bet(callback: CallbackQuery, state: FSMContext):
             await callback.answer("Неизвестный тип ставки")
             return
 
-        # 5. Обрабатываем ставку через GameManager (передаем user_db_id)
         success, result_message, bet_data = await game_manager.process_bet(
-            session, match_id, user_db_id, selected_player_id, bet_type_enum, bet_value  # ← Используем user_db_id
+            session, match_id, user_db_id, selected_player_id, bet_type_enum, bet_value
         )
-
         if not success:
             await callback.answer(f"❌ {result_message}")
             return
 
-        # 6. Бросок кубика
-        dice_roll = random.randint(1, 6)
-
-        # 7. Проверяем, выиграла ли ставка
-        bet_won = check_bet(selected_bet_type, dice_roll, bet_value)
-
-        # 8. Создаем запись о ставке
         bet = Bet(
             match_id=match_id,
-            user_id=user_db_id,  # ← Используем user_db_id
+            user_id=user_db_id,
             player_id=selected_player_id,
-            bet_type=selected_bet_type,
+            bet_type=bet_type_enum,
             bet_value=bet_value,
             player_position=selected_player_position,
-            dice_roll=dice_roll,
-            bet_result=BetStatus.WON if bet_won else BetStatus.LOST,
+            dice_roll=None,
+            bet_result=BetStatus.PENDING,
+            actions_gained=None,
             turn_number=match.current_turn,
             bet_order=current_bet_number
         )
 
-        # 9. Рассчитываем полученные действия
-        if bet_won:
-            actions = calculate_actions(selected_player_position, selected_bet_type)
-            bet.actions_gained = actions
+        current_field = match.current_on_field or {'DF': 0, 'MF': 0, 'FW': 0}
+        current_field[selected_player_position] = current_field.get(selected_player_position, 0) + 1
+        match.current_on_field = current_field
 
-            # Обновляем действия игрока в матче (используем user_db_id)
-            match.update_player_actions(user_db_id, actions)  # ← Используем user_db_id
+        if match.used_players is None:
+            match.used_players = []
+        match.used_players.append(selected_player_id)
 
         session.add(bet)
 
-        # 10. Обновляем счетчик ставок в состоянии
         bets_made = state_data.get('bets_made', 0) + 1
         await state.update_data(bets_made=bets_made)
 
-        # 11. Если это первая ставка и можно сделать вторую, предлагаем вторую ставку
-        if current_bet_number == 1:
-            # Проверяем, можно ли сделать вторую ставку на этого же игрока
-            tracker = match.bet_tracker
-            available_second = tracker.get_available_bet_types(
-                selected_player_id, selected_player_position, True
-            )
-
-            if available_second:
-                # Можем сделать вторую ставку
-                await state.update_data(current_bet_number=2)
-                await show_bet_type_selection_second(
-                    callback.message, match, selected_player_id, selected_player_position
-                )
-            else:
-                # Вторую ставку сделать нельзя, завершаем ход
-                await complete_turn(callback.message, match, state, dice_roll, bet_won)
-        else:
-            # Вторая ставка сделана, завершаем ход
-            await complete_turn(callback.message, match, state, dice_roll, bet_won)
-
         await session.commit()
 
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="Отменить / Изменить ставку",
+                        callback_data=f"cancel_bet_{match_id}_{selected_player_id}"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="Подтвердить ход и ждать соперника",
+                        callback_data=f"confirm_turn_{match_id}"
+                    )
+                ]
+            ]
+        )
+
+        await callback.message.edit_text(
+            f"Ставка принята на {selected_player_name} ({selected_player_position}).\n"
+            "Можно отменить или подтвердить ход.",
+            reply_markup=keyboard
+        )
+
+        await callback.answer("Ставка сохранена")
+
+
+@router.callback_query(F.data.startswith("confirm_turn_"))
+async def confirm_turn(callback: CallbackQuery):
+    """
+    Подтверждение хода игрока и запуск хода бота (для матчей VS_BOT).
+    """
+    match_id = int(callback.data.split("_")[2])
+    async with AsyncSessionLocal() as session:
+        match = await session.get(Match, match_id)
+        if not match or match.current_player_turn != "player1":
+            await callback.answer("Не ваш ход")
+            return
+
+        match.current_player_turn = "player2"
+        await session.commit()
+
+        Final4BotAI, BotDifficulty = get_bot_ai()
+        bot_instance = Final4BotAI(difficulty=BotDifficulty.MEDIUM)
+        await bot_instance.make_bot_turn(match, session)
+
+        await callback.message.edit_text(
+            "Ваш ход подтверждён. Соперник сделал ставку и бросил кубик.\n"
+            "Итоги хода уже показаны выше."
+        )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cancel_bet_"))
+async def cancel_bet(callback: CallbackQuery):
+    """
+    Отмена последней ставки.
+    """
+    match_id = int(callback.data.split("_")[2])
+    player_id = int(callback.data.split("_")[3])
+    async with AsyncSessionLocal() as session:
+        match = await session.get(Match, match_id)
+        await session.commit()
+        await callback.message.edit_text("Ставка отменена. Выберите заново.")
+    await callback.answer()
+
 
 async def show_bet_type_selection_second(message: Message, match: Match,
                                          player_id: int, position: str):
-    """Показывает выбор второй ставки"""
-    # Получаем доступные типы для второй ставки
+    """
+    Показ выбора второй ставки (если применимо).
+    """
     tracker = match.bet_tracker
     available_second = tracker.get_available_bet_types(player_id, position, True)
 
@@ -1191,12 +1205,12 @@ async def show_bet_type_selection_second(message: Message, match: Match,
 {EMOJI['info']} <b>Доступные типы для второй ставки:</b>"""
 
     keyboard_buttons = []
-    for bet_type in available_second:  # bet_type здесь - объект BetType (не строка!)
-        if bet_type == BetType.EVEN_ODD:  # Используем BetType enum
+    for bet_type in available_second:
+        if bet_type == BetType.EVEN_ODD:
             keyboard_buttons.append([
                 InlineKeyboardButton(
                     text="🔢 Чет/Нечет",
-                    callback_data=f"bet_type_{match.id}_{player_id}_{bet_type.value}"  # .value!
+                    callback_data=f"bet_type_{match.id}_{player_id}_{bet_type.value}"
                 )
             ])
         elif bet_type == BetType.BIG_SMALL:
@@ -1217,43 +1231,48 @@ async def show_bet_type_selection_second(message: Message, match: Match,
     keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
     await message.answer(text, reply_markup=keyboard, parse_mode='HTML')
 
+
 async def complete_turn(message: Message, match: Match, state: FSMContext,
                         dice_roll: int, bet_won: bool):
-    """Завершает ход и переключает на другого игрока"""
+    """
+    Завершение хода после броска кубика.
+    """
     state_data = await state.get_data()
     selected_player_position = state_data.get('selected_player_position')
     selected_bet_type = state_data.get('selected_bet_type')
     bet_value = state_data.get('bet_value', '')
 
-    # Показываем результат
     await show_bet_result(
         message, match.id, dice_roll, bet_won,
         selected_player_position, selected_bet_type, bet_value
     )
 
-    # Переключаем ход
     async with AsyncSessionLocal() as session:
         db_match = await session.get(Match, match.id)
         db_match.switch_turn()
 
-        # Если переключились на первого игрока, увеличиваем номер хода
-        if db_match.current_player_turn == "player1":
-            db_match.current_turn += 1
+        if state_data.get('current_bet_number', 1) == 2:
+            current_field = db_match.current_on_field or {'DF': 0, 'MF': 0, 'FW': 0}
+            current_field = current_field.get(selected_player_position, 0) + 1
+            db_match.current_on_field = current_field
 
-            # Проверяем, не закончилось ли основное время
-            if db_match.current_turn > 11 and not db_match.is_extra_time:
-                # Начинаем дополнительное время
-                await start_extra_time(message, db_match, state)
-                return
+            if db_match.used_players is None:
+                db_match.used_players = []
+            db_match.used_players.append(state_data.get('selected_player_id'))
+
+        session.add(db_match)
+
+        if db_match.current_turn > 11 and not db_match.is_extra_time:
+            await start_extra_time(message, db_match, state)
+            return
 
         await session.commit()
 
-        # Показываем следующий ход
-        await show_turn(message, state, match.id, db_match.current_turn)
-
 
 async def start_extra_time(message: Message, match: Match, state: FSMContext):
-    """Начинает дополнительное время"""
+    """
+    Переход к дополнительному времени (вызов выбора игроков).
+    """
     text = f"""{EMOJI['clock']} <b>Дополнительное время!</b>
 
 Матч #{match.id}
@@ -1266,21 +1285,20 @@ async def start_extra_time(message: Message, match: Match, state: FSMContext):
 
     await message.answer(text, parse_mode='HTML')
 
-    # Начинаем выбор игроков для ДВ
     await state.set_state(MatchStates.SELECTING_EXTRA_TIME_PLAYERS)
     await state.update_data(
         extra_time_selected=[],
         selecting_for_match=match.id
     )
 
-    # Показываем выбор игроков для ДВ
     await show_extra_time_selection(message, match.id, match.get_current_user_id())
 
 
 async def show_extra_time_selection(message: Message, match_id: int, user_id: int):
-    """Показывает выбор игроков для дополнительного времени"""
+    """
+    Показ клавиатуры выбора 5 игроков для дополнительного времени.
+    """
     async with AsyncSessionLocal() as session:
-        # Получаем игроков для ДВ через GameManager
         extra_players = await game_manager.get_extra_time_players(
             session, match_id, user_id
         )
@@ -1306,7 +1324,6 @@ async def show_extra_time_selection(message: Message, match_id: int, user_id: in
 • После выбора нажмите "Готово"
 • Можно отменить выбор кнопкой "Назад\""""
 
-        # Создаем клавиатуру с игроками
         keyboard_buttons = []
         for player in extra_players:
             emoji = get_position_emoji(player.get('position', 'GK'))
@@ -1320,7 +1337,6 @@ async def show_extra_time_selection(message: Message, match_id: int, user_id: in
                 )
             ])
 
-        # Кнопка готово (пока 0/5)
         keyboard_buttons.append([
             InlineKeyboardButton(
                 text=f"{EMOJI['check']} Готово (0/5)",
@@ -1328,7 +1344,6 @@ async def show_extra_time_selection(message: Message, match_id: int, user_id: in
             )
         ])
 
-        # Кнопка отмены
         keyboard_buttons.append([
             InlineKeyboardButton(
                 text=f"{EMOJI['back']} Назад",
@@ -1339,11 +1354,12 @@ async def show_extra_time_selection(message: Message, match_id: int, user_id: in
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
         await message.answer(text, reply_markup=keyboard, parse_mode='HTML')
 
-# Вспомогательные функции (остаются почти без изменений)
 
 async def search_opponent(match_id: int, bot):
-    """Поиск соперника для матча"""
-    await asyncio.sleep(2)  # Имитация поиска
+    """
+    Фоновая задача поиска соперника (заглушка).
+    """
+    await asyncio.sleep(2)
 
     async with AsyncSessionLocal() as session:
         match = await session.get(Match, match_id)
@@ -1351,12 +1367,9 @@ async def search_opponent(match_id: int, bot):
         if not match or match.status != MatchStatus.WAITING:
             return
 
-        # TODO: Реальная логика поиска соперника
-        # Пока просто завершаем с ошибкой
         match.status = MatchStatus.CANCELLED
         await session.commit()
 
-        # Уведомляем пользователя
         try:
             await bot.send_message(
                 match.player1_id,
@@ -1369,57 +1382,11 @@ async def search_opponent(match_id: int, bot):
             pass
 
 
-def check_bet(bet_type: str, dice_roll: int, bet_value: str) -> bool:
-    """Проверяет, выиграла ли ставка"""
-    if bet_type == BetType.EVEN_ODD.value:
-        is_even = dice_roll % 2 == 0
-        return (bet_value == 'чет' and is_even) or (bet_value == 'нечет' and not is_even)
-
-    elif bet_type == BetType.BIG_SMALL.value:
-        is_less = dice_roll <= 3
-        return (bet_value == 'меньше' and is_less) or (bet_value == 'больше' and not is_less)
-
-    elif bet_type == BetType.GOAL.value:
-        return str(dice_roll) == bet_value
-
-    return False
-
-
-def calculate_actions(position: str, bet_type: str) -> dict:
-    """Рассчитывает полезные действия по правилам"""
-    actions = {'goals': 0, 'passes': 0, 'defenses': 0}
-
-    if position == 'GK' and bet_type == BetType.EVEN_ODD.value:
-        actions['defenses'] = 3
-
-    elif position == 'DF':
-        if bet_type == BetType.EVEN_ODD.value:
-            actions['defenses'] = 2
-        elif bet_type == BetType.BIG_SMALL.value:
-            actions['passes'] = 1
-        elif bet_type == BetType.GOAL.value:
-            actions['goals'] = 1
-
-    elif position == 'MF':
-        if bet_type == BetType.EVEN_ODD.value:
-            actions['defenses'] = 1
-        elif bet_type == BetType.BIG_SMALL.value:
-            actions['passes'] = 2
-        elif bet_type == BetType.GOAL.value:
-            actions['goals'] = 1
-
-    elif position == 'FW':
-        if bet_type == BetType.BIG_SMALL.value:
-            actions['passes'] = 1
-        elif bet_type == BetType.GOAL.value:
-            actions['goals'] = 1
-
-    return actions
-
-
 async def show_bet_result(message: Message, match_id: int, dice_roll: int,
                           bet_won: bool, position: str, bet_type: str, bet_value: str):
-    """Показывает результат ставки"""
+    """
+    Отображение результата ставки и полученных действий.
+    """
     result_emoji = "✅" if bet_won else "❌"
     result_text = "Выиграна" if bet_won else "Проиграна"
 
@@ -1451,7 +1418,9 @@ async def show_bet_result(message: Message, match_id: int, dice_roll: int,
 
 
 def get_player_name(match, player_id: int) -> str:
-    """Возвращает имя игрока"""
+    """
+    Возвращает имя игрока для отображения в сообщениях.
+    """
     if player_id == match.player1_id:
         return "Игрок 1"
     elif player_id == match.player2_id:
@@ -1463,7 +1432,9 @@ def get_player_name(match, player_id: int) -> str:
 
 
 def get_position_emoji(position: str) -> str:
-    """Возвращает emoji для позиции"""
+    """
+    Возвращает эмодзи для позиции футболиста.
+    """
     emojis = {
         'GK': '🥅',
         'DF': '🛡️',
@@ -1475,13 +1446,11 @@ def get_position_emoji(position: str) -> str:
 
 def create_extra_time_keyboard(session, match_id: int, user_id: int,
                                selected_player_ids: List[int]) -> InlineKeyboardMarkup:
-    """Создает клавиатуру для выбора игроков ДВ"""
-    # Это заглушка - в реальности нужно получать игроков из БД
-    # Пока возвращаем простую клавиатуру
-
+    """
+    Создание клавиатуры для дополнительного времени (заглушка).
+    """
     keyboard_buttons = []
 
-    # Кнопка готово с счетчиком
     keyboard_buttons.append([
         InlineKeyboardButton(
             text=f"{EMOJI['check']} Готово ({len(selected_player_ids)}/5)",
@@ -1489,7 +1458,6 @@ def create_extra_time_keyboard(session, match_id: int, user_id: int,
         )
     ])
 
-    # Кнопка отмены
     keyboard_buttons.append([
         InlineKeyboardButton(
             text=f"{EMOJI['cancel']} Отмена",
@@ -1501,7 +1469,9 @@ def create_extra_time_keyboard(session, match_id: int, user_id: int,
 
 
 async def get_extra_time_players_for_keyboard(session, match_id: int, user_id: int) -> List[Dict]:
-    """Возвращает игроков для отображения в клавиатуре ДВ"""
+    """
+    Получение списка игроков для клавиатуры ДВ через GameManager.
+    """
     async with AsyncSessionLocal() as session:
         match = await session.get(Match, match_id)
         if not match:
@@ -1511,17 +1481,18 @@ async def get_extra_time_players_for_keyboard(session, match_id: int, user_id: i
         if not user or not user.team_data:
             return []
 
-        # Получаем игроков через GameManager
         extra_players = await game_manager.get_extra_time_players(
             session, match_id, user_id
         )
 
         return extra_players
 
-# Регистрация команд (остаются без изменений)
+
 @router.message(Command("matches"))
 async def command_matches(message: Message):
-    """Список активных матчей"""
+    """
+    Команда /matches — список активных матчей пользователя.
+    """
     user_id = message.from_user.id
 
     async with AsyncSessionLocal() as session:
@@ -1572,7 +1543,9 @@ async def command_matches(message: Message):
 
 @router.message(lambda message: message.text and message.text.startswith('/match_'))
 async def command_match_detail(message: Message):
-    """Детали матча по ID"""
+    """
+    Команда /match_123 — детальная информация о конкретном матче.
+    """
     try:
         match_id = int(message.text.split('_')[1])
     except (IndexError, ValueError):
@@ -1609,7 +1582,7 @@ async def command_match_detail(message: Message):
 Голы: DF ({match.bet_tracker.get_goal_quota_used('DF')}/1), 
       MF ({match.bet_tracker.get_goal_quota_used('MF')}/3), 
       FW ({match.bet_tracker.get_goal_quota_used('FW')}/4)
-Чет/нечет: {match.bet_tracker.get_even_odd_count()}/6 игроков"""
+Чет/нечет: {match.bet_tracker.get_EVEN_ODD_count()}/6 игроков"""
 
         keyboard_buttons = []
 
@@ -1651,14 +1624,18 @@ async def command_match_detail(message: Message):
 
 @router.callback_query(F.data == "show_matches")
 async def show_matches_callback(callback: CallbackQuery):
-    """Показывает список матчей"""
+    """
+    Callback для возврата к списку матчей.
+    """
     await callback.answer()
     await command_matches(callback.message)
 
 
 @router.callback_query(F.data.startswith("continue_match_"))
 async def continue_match_callback(callback: CallbackQuery, state: FSMContext):
-    """Продолжение матча"""
+    """
+    Продолжение активного матча (вызов show_turn).
+    """
     match_id = int(callback.data.split("_")[2])
 
     await state.update_data(match_id=match_id)
@@ -1674,7 +1651,9 @@ async def continue_match_callback(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("cancel_match_"))
 async def cancel_match_callback(callback: CallbackQuery):
-    """Отмена матча"""
+    """
+    Отмена матча (только для статусов CREATED / WAITING).
+    """
     match_id = int(callback.data.split("_")[2])
 
     async with AsyncSessionLocal() as session:
@@ -1691,5 +1670,3 @@ async def cancel_match_callback(callback: CallbackQuery):
             )
         else:
             await callback.answer("Нельзя отменить этот матч")
-
-

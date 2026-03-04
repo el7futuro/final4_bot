@@ -2,13 +2,12 @@
 """
 Инициализация ядра игры Final 4.
 """
+from .engine_classes import Final4GameEngine, BetType, BetStatus, CardType, Base, Bet
 
-from .game_engine import Final4GameEngine, BetType, CardType
-from .dice import DiceRoll, DiceManager, BetChecker, ActionCalculator
+from .dice import DiceRoll, DiceManager,  ActionCalculator
 from .match_calculator import MatchCalculator, MatchResult
 from .extra_time import ExtraTimeManager, PenaltyShootout
-from .bot_ai import Final4BotAI, BotDifficulty
-
+from .bot_ai import Final4BotAI
 __all__ = [
     # Из game_engine.py
     'Final4GameEngine',
@@ -18,7 +17,7 @@ __all__ = [
     # Из dice.py
     'DiceRoll',
     'DiceManager',
-    'BetChecker',
+
     'ActionCalculator',
 
     # Из match_calculator.py
@@ -30,6 +29,6 @@ __all__ = [
     'PenaltyShootout',
 
     # Из bot_ai.py
-    'Final4BotAI',
-    'BotDifficulty'
+    'Final4BotAI'
+
 ]

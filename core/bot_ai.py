@@ -8,6 +8,16 @@ import random
 from typing import Dict, List, Optional, Tuple, Any
 from enum import Enum
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
+import bot
+
+from core.game_utils import check_bet, calculate_actions
+from datetime import datetime
+from models.bet import BetStatus, BetType, Bet
+from models.match import Match
+
+
 
 class BotDifficulty(Enum):
     """Уровень сложности бота"""
@@ -19,13 +29,13 @@ class BotDifficulty(Enum):
 class Final4BotAI:
     """ИИ для бота в Final 4 (согласно правилам из документа)"""
 
-    def __init__(self, difficulty: BotDifficulty = BotDifficulty.MEDIUM):
-        self.difficulty = difficulty
+    def __init__(self, difficulty=None):  # ← параметр не нужен
+        self.difficulty = 2  # 2 = MEDIUM, просто число
 
         # Счетчики для соблюдения правил (на 1 матч)
         self.used_players = set()  # На каких игроков уже ставили
-        self.gk_odd_even_done = False  # Ставка на вратаря сделана
-        self.odd_even_count = 0  # Ставок Чет/Нечет (макс 6)
+        self.gk_EVEN_ODD_done = False  # Ставка на вратаря сделана
+        self.EVEN_ODD_count = 0  # Ставок Чет/Нечет (макс 6)
         self.goal_bets = {  # Ставок на гол по позициям
             'DF': 0,  # Макс 1
             'MF': 0,  # Макс 3
@@ -37,8 +47,8 @@ class Final4BotAI:
     def reset_for_new_match(self):
         """Сброс для нового матча"""
         self.used_players.clear()
-        self.gk_odd_even_done = False
-        self.odd_even_count = 0
+        self.gk_EVEN_ODD_done = False
+        self.EVEN_ODD_count = 0
         self.goal_bets = {'DF': 0, 'MF': 0, 'FW': 0}
         self.current_turn = 1
         self.my_actions = {'goals': 0, 'passes': 0, 'defenses': 0}
@@ -47,7 +57,7 @@ class Final4BotAI:
                            my_formation: str, opponent_actions: Dict) -> Dict:
         """
         Принимает решение на ход.
-        Возвращает: {'player_id': X, 'bet_type': 'odd_even/less_more/exact', 'bet_value': '...'}
+        Возвращает: {'player_id': X, 'bet_type': 'EVEN_ODD/BIG_SMALL/exact', 'bet_value': '...'}
         """
         self.current_turn = turn
 
@@ -62,12 +72,7 @@ class Final4BotAI:
             return self._fallback_choice(active_players[0]) if active_players else None
 
         # 3. Выбираем лучший ход по стратегии
-        if self.difficulty == BotDifficulty.EASY:
-            choice = random.choice(available_choices)
-        elif self.difficulty == BotDifficulty.MEDIUM:
-            choice = self._medium_strategy(available_choices, opponent_actions)
-        else:  # HARD
-            choice = self._hard_strategy(available_choices, opponent_actions, turn)
+        choice = self._medium_strategy(available_choices, opponent_actions)
 
         # 4. Обновляем счетчики
         self._update_counters(choice)
@@ -108,11 +113,11 @@ class Final4BotAI:
                 continue
 
             # ПРАВИЛО: Первый ход - обязательно ставка на вратаря Чет/Нечет
-            if self.current_turn == 1 and position == 'GK' and not self.gk_odd_even_done:
+            if self.current_turn == 1 and position == 'GK' and not self.gk_EVEN_ODD_done:
                 choices.append({
                     'player_id': player_id,
                     'player_position': position,
-                    'bet_type': 'odd_even',
+                    'bet_type': 'EVEN_ODD',
                     'bet_value': random.choice(['чет', 'нечет'])
                 })
                 continue
@@ -120,11 +125,11 @@ class Final4BotAI:
             # ПРАВИЛО: Форварды не могут ставить Чет/Нечет
             if position != 'FW':
                 # ПРАВИЛО: Макс 6 ставок Чет/Нечет (включая вратаря)
-                if self.odd_even_count < 6:
+                if self.EVEN_ODD_count < 6:
                     choices.append({
                         'player_id': player_id,
                         'player_position': position,
-                        'bet_type': 'odd_even',
+                        'bet_type': 'EVEN_ODD',
                         'bet_value': random.choice(['чет', 'нечет'])
                     })
 
@@ -133,7 +138,7 @@ class Final4BotAI:
                 choices.append({
                     'player_id': player_id,
                     'player_position': position,
-                    'bet_type': 'less_more',
+                    'bet_type': 'BIG_SMALL',
                     'bet_value': random.choice(['меньше', 'больше'])
                 })
 
@@ -173,13 +178,13 @@ class Final4BotAI:
         if opp_def > my_pass + 2:
             # Предпочитаем ставки на передачи
             for choice in choices:
-                if choice['bet_type'] == 'less_more':
+                if choice['bet_type'] == 'BIG_SMALL':
                     return choice
 
         # Если у нас мало защит, нужно больше отбитий
         if my_def < 5:
             for choice in choices:
-                if choice['bet_type'] == 'odd_even':
+                if choice['bet_type'] == 'EVEN_ODD':
                     return choice
 
         # Иначе стремимся к голам
@@ -210,12 +215,12 @@ class Final4BotAI:
         bet_type = choice['bet_type']
 
         # Вероятности успеха (грубо)
-        if bet_type == 'odd_even':
+        if bet_type == 'EVEN_ODD':
             prob = 0.5  # 50%
             value = {'GK': 3, 'DF': 2, 'MF': 1}.get(pos, 0)
             score = prob * value * 2  # Защита важна
 
-        elif bet_type == 'less_more':
+        elif bet_type == 'BIG_SMALL':
             prob = 0.5  # 50%
             value = {'DF': 1, 'MF': 2, 'FW': 1}.get(pos, 0)
             score = prob * value
@@ -227,7 +232,7 @@ class Final4BotAI:
 
         # Корректировка по ходу
         if turn <= 2:  # Ранние ходы
-            if bet_type in ['odd_even', 'less_more']:
+            if bet_type in ['EVEN_ODD', 'BIG_SMALL']:
                 score *= 1.5  # Важнее защита и передачи
         else:  # Поздние ходы
             if bet_type == 'exact':
@@ -240,16 +245,16 @@ class Final4BotAI:
         position = player['position']
 
         if position == 'GK':
-            bet_type = 'odd_even'
+            bet_type = 'EVEN_ODD'
             bet_value = random.choice(['чет', 'нечет'])
         elif position == 'FW':
-            bet_type = 'less_more'
+            bet_type = 'BIG_SMALL'
             bet_value = random.choice(['меньше', 'больше'])
         else:
-            bet_type = random.choice(['odd_even', 'less_more', 'exact'])
-            if bet_type == 'odd_even':
+            bet_type = random.choice(['EVEN_ODD', 'BIG_SMALL', 'exact'])
+            if bet_type == 'EVEN_ODD':
                 bet_value = random.choice(['чет', 'нечет'])
-            elif bet_type == 'less_more':
+            elif bet_type == 'BIG_SMALL':
                 bet_value = random.choice(['меньше', 'больше'])
             else:
                 bet_value = str(random.randint(1, 6))
@@ -269,11 +274,11 @@ class Final4BotAI:
 
         self.used_players.add(player_id)
 
-        if position == 'GK' and bet_type == 'odd_even':
-            self.gk_odd_even_done = True
+        if position == 'GK' and bet_type == 'EVEN_ODD':
+            self.gk_EVEN_ODD_done = True
 
-        if bet_type == 'odd_even':
-            self.odd_even_count += 1
+        if bet_type == 'EVEN_ODD':
+            self.EVEN_ODD_count += 1
 
         if bet_type == 'exact':
             if position == 'DF':
@@ -293,3 +298,84 @@ class Final4BotAI:
         # ПРАВИЛО ИГРЫ: Любую вытянутую карточку "Свисток" нужно использовать сразу
         # Отказаться от использования карточки нельзя
         return True
+
+# ——— Новый метод — ход бота ———
+    async def make_bot_turn(self, match: Match, session: AsyncSession):
+        # 1. Получаем доступных игроков для бота — так же, как для человека
+        from services.game_manager import game_manager
+        available_players = await game_manager.get_available_players(
+            session, match.id, match.player2_id  # ← player2_id вместо user_db_id
+        )
+
+        if not available_players:
+            print("DEBUG bot: нет доступных игроков")
+            await bot.send_message(
+                match.player1_id,
+                "Соперник не смог выбрать игрока. Ход возвращается вам."
+            )
+            match.current_player_turn = "player1"
+            await session.commit()
+            return
+
+        # 2. Выбираем случайного (или умнее — по стратегии)
+        player = random.choice(available_players)
+        player_id = player['id']
+        position = player['position']
+
+        # 3. Выбор ставки (твой метод)
+        choice = self.make_turn_decision(
+            self.current_turn, match.player2_team_data['players'], None, match.player1_actions
+        )
+        bet_type = choice['bet_type']
+        bet_value = choice['bet_value']
+
+        # 3. Создаём ставку бота (PENDING)
+        bet = Bet(
+            match_id=match.id,
+            user_id=match.player2_id,
+            player_id=player_id,
+            bet_type=BetType[bet_type.upper()],  # EVEN_ODD, BIG_SMALL, GOAL
+            bet_value=bet_value,
+            player_position=position,
+            dice_roll=None,
+            bet_result=BetStatus.PENDING,
+            actions_gained=None,
+            turn_number=match.current_turn,
+            bet_order=1  # или 2, если вторая ставка
+        )
+        session.add(bet)
+        await session.commit()
+
+        # 4. Бросок кубика
+        dice_roll = random.randint(1, 6)
+        bet_won = check_bet(bet_type, dice_roll, bet_value)
+
+        # 5. Действия
+        actions = calculate_actions(position, bet_type) if bet_won else {'goals': 0, 'passes': 0, 'defenses': 0}
+        match.update_player_actions(match.player2_id, actions)
+
+        # 6. Обновляем ставку бота
+        bet.dice_roll = dice_roll
+        bet.bet_result = BetStatus.WON if bet_won else BetStatus.LOST
+        bet.actions_gained = actions
+        bet.resolved_at = datetime.utcnow()
+        session.add(bet)
+        await session.commit()
+
+        # 7. Переключаем ход обратно
+        match.current_player_turn = "player1"
+        match.current_turn += 1
+        await session.commit()
+
+        # 8. Показываем игроку итоги хода бота
+        result_text = f"🤖 Соперник выбрал {player['name']} ({position}).\n" \
+                      f"Ставка: {bet_type} {bet_value}\n" \
+                      f"Выпало: {dice_roll}\n" \
+                      f"Результат: {'Выиграл' if bet_won else 'Проиграл'}\n" \
+                      f"Действия: голы {actions['goals']}, передачи {actions['passes']}, отбития {actions['defenses']}"
+
+        await bot.send_message(
+            chat_id=match.player1_id,
+            text=result_text,
+            parse_mode="HTML"
+        )

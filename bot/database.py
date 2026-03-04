@@ -1,42 +1,44 @@
 import logging
 from typing import AsyncGenerator
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy import text
-from sqlalchemy.orm import declarative_base
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.orm import declarative_base
 from bot.config import load_config
 
 logger = logging.getLogger(__name__)
 
-# Загрузка конфигурации
+# ──────────────────────────────────────────────────────────────
+# Конфигурация и создание движка базы данных
+# ──────────────────────────────────────────────────────────────
+
 config = load_config()
 
-# Создание движка БД
-DATABASE_URL = f"postgresql+asyncpg://{config.db.user}:{config.db.password}@" \
-               f"{config.db.host}:{config.db.port}/{config.db.database}"
+DATABASE_URL = (
+    f"postgresql+asyncpg://{config.db.user}:{config.db.password}@"
+    f"{config.db.host}:{config.db.port}/{config.db.database}"
+)
 
 logger.info(f"Подключение к БД: {config.db.host}:{config.db.port}/{config.db.database}")
 
 try:
     engine = create_async_engine(
         DATABASE_URL,
-        echo=False,  # Поставьте True для отладки SQL запросов
+        echo=False,  # True для отладки SQL-запросов (в продакшене False)
         pool_size=20,
         max_overflow=10,
         pool_pre_ping=True,
         connect_args={
             "command_timeout": 60,
-            "server_settings": {
-                "application_name": "final4_bot"
-            }
-        }
+            "server_settings": {"application_name": "final4_bot"},
+        },
     )
 
-    # Создание фабрики сессий
+    # Фабрика асинхронных сессий
     AsyncSessionLocal = async_sessionmaker(
         engine,
         class_=AsyncSession,
-        expire_on_commit=False
+        expire_on_commit=False,
     )
 
     Base = declarative_base()
@@ -48,26 +50,36 @@ except Exception as e:
     raise
 
 
-async def init_db() -> None:
-    """Инициализация базы данных (создание таблиц)"""
-    try:
-        # Импортируем модели для создания таблиц
-        from models.user import User
+# ──────────────────────────────────────────────────────────────
+# Функции инициализации и работы с БД
+# ──────────────────────────────────────────────────────────────
 
+
+async def init_db() -> None:
+    """
+    Инициализация базы данных: создаёт все таблицы, если их ещё нет.
+
+    Примечание:
+        - Импортирует все модели перед созданием таблиц, чтобы SQLAlchemy их увидел.
+        - Использует `Base.metadata.create_all` — безопасно, не удаляет существующие данные.
+    """
+    try:
+        # Импортируем все модели (SQLAlchemy должен знать о них)
+        from models.user import User
         from models.match import Match
+        from models.bet import Bet, BetType, BetStatus
         from models.card import Card
-        from models.bet import Bet
         from models.tournament import Tournament
 
+        # Создаём таблицы в транзакции
         async with engine.begin() as conn:
-            # Создаем все таблицы
             await conn.run_sync(Base.metadata.create_all)
-            logger.info("Таблицы созданы успешно")
 
-        logger.info("✅ База данных успешно инициализирована")
+        logger.info("Все таблицы созданы или уже существуют")
+        logger.info("✅ База данных инициализирована")
 
     except SQLAlchemyError as e:
-        logger.error(f"Ошибка SQLAlchemy при инициализации БД: {e}")
+        logger.error(f"Ошибка SQLAlchemy при создании таблиц: {e}")
         raise
     except Exception as e:
         logger.error(f"Неожиданная ошибка при инициализации БД: {e}")
@@ -75,7 +87,18 @@ async def init_db() -> None:
 
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
-    """Получение асинхронной сессии БД"""
+    """
+    Генератор асинхронной сессии для работы с БД.
+
+    Использование:
+        async with get_session() as session:
+            ...
+
+    Особенности:
+        - Автоматически коммитит изменения при успешном завершении блока
+        - Откатывает транзакцию при ошибке
+        - Всегда закрывает сессию в finally
+    """
     session = AsyncSessionLocal()
     try:
         yield session
@@ -89,16 +112,19 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def check_db_connection() -> bool:
-    """Проверка подключения к базе данных"""
+    """
+    Проверяет, активно ли соединение с базой данных.
+
+    Возвращает:
+        True  — подключение успешно
+        False — ошибка подключения
+
+    Примечание:
+        Выполняет простой запрос SELECT 1 для проверки.
+    """
     try:
         async with engine.connect() as conn:
-            # Вариант 1: Просто выполнить запрос
             await conn.execute(text("SELECT 1"))
-
-            # Или вариант 2: Получить результат
-            # result = await conn.execute(text("SELECT 1"))
-            # await result.fetchone()
-
         logger.info("✅ Подключение к базе данных успешно")
         return True
     except Exception as e:
@@ -106,8 +132,11 @@ async def check_db_connection() -> bool:
         return False
 
 
-
 async def close_db() -> None:
-    """Корректное закрытие соединения с БД"""
+    """
+    Корректно закрывает все пулы соединений с базой данных.
+
+    Вызывать при завершении работы приложения.
+    """
     await engine.dispose()
     logger.info("Соединение с БД закрыто")
