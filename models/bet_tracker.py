@@ -264,12 +264,15 @@ class BetTracker(BaseModel):
     # ─── Дополнительное время ──────────────────────────────────────────
 
     def start_extra_time(self, extra_player_ids: List[int]) -> None:
-        """Запускает дополнительное время с выбранными запасными."""
+        """
+        Запускает дополнительное время с выбранными запасными.
+        """
         self.is_extra_time = True
         self.current_turn = 1
         self.extra_time_player_ids = extra_player_ids[:]
         self.reset_current_turn()
-
+        # Не сбрасываем player_bets - они нужны для проверки,
+        # что в ДВ используются только новые игроки
     def get_extra_time_players(self, all_players: List[Dict]) -> List[Dict]:
         """
         Возвращает список игроков, допущенных к ставкам в дополнительное время.

@@ -235,20 +235,50 @@ class Match(Base):
     def start_extra_time(self, player1_ids: List[int], player2_ids: List[int]) -> None:
         """
         Переводит матч в режим дополнительного времени.
-        Устанавливает выбранных запасных игроков и сбрасывает счётчик ходов.
+
+        Args:
+            player1_ids: список ID 5 запасных игроков для первого игрока
+            player2_ids: список ID 5 запасных игроков для второго игрока
+
+        Важно:
+            - Вызывается ТОЛЬКО при ничейном счете после 11 ходов
+            - Списки должны содержать ровно 5 ID каждый
+            - Эти игроки НЕ использовались в основном времени
         """
+        # Валидация
+        if len(player1_ids) != 5 or len(player2_ids) != 5:
+            logger.error(f"Попытка начать ДВ с неверным количеством игроков: "
+                         f"p1={len(player1_ids)}, p2={len(player2_ids)}")
+            raise ValueError("Для ДВ нужно ровно 5 запасных от каждой команды")
+
+        # Проверяем, что эти игроки действительно не использовались
+        used_set = set(self.used_players or [])
+        for pid in player1_ids + player2_ids:
+            if pid in used_set:
+                logger.error(f"Попытка использовать игрока {pid} в ДВ, но он уже играл в основном времени")
+                raise ValueError(f"Игрок {pid} уже использовался в основном времени")
+
+        # Устанавливаем флаги ДВ
         self.is_extra_time = True
-        self.current_turn = 1
-        self.current_player_turn = "player1"
+        self.current_turn = 1  # Сбрасываем счетчик ходов
+        self.current_player_turn = "player1"  # Первый игрок начинает ДВ
+
+        # Сохраняем списки запасных
         self.extra_time_players = {
             "player1": player1_ids,
             "player2": player2_ids
         }
 
+        # Обновляем BetTracker для работы в режиме ДВ
         tracker = self.bet_tracker
-        tracker.start_extra_time([])  # конкретные игроки проверяются позже
+        tracker.start_extra_time(player1_ids + player2_ids)  # передаем общий список всех запасных
         self.bet_tracker = tracker
 
+        # Сбрасываем used_players? Нет, оставляем историю основного времени
+        # В ДВ будем использовать отдельную логику через BetTracker
+
+        logger.info(f"Матч {self.id} перешел в дополнительное время. "
+                    f"Запасные p1: {player1_ids}, p2: {player2_ids}")
     def to_dict(self) -> Dict[str, Any]:
         """Краткая сериализация матча (для API, логов, уведомлений)."""
         return {

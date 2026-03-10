@@ -18,7 +18,7 @@ import logging
 from typing import List, Dict, Tuple, Optional, Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select,func
 
 from models.user import User
 from models.match import Match, MatchStatus
@@ -365,6 +365,124 @@ class GameManager:
         """
         return bet_validator.calculate_match_result(player1_actions, player2_actions)
 
+    async def check_match_completion(
+            self,
+            session: AsyncSession,
+            match: Match
+    ) -> Tuple[bool, str, Optional[Dict]]:
+        """
+        Проверяет, завершен ли матч, и если да - возвращает информацию.
+
+        Returns:
+            (is_completed, result_message, result_data)
+            result_data содержит:
+            - action: "extra_time" или "finish"
+            - score1, score2: итоговый счет
+            - winner_id, loser_id (если finish)
+            - explanation: детали расчета
+        """
+        # Проверяем только если матч в процессе и не в ДВ
+        if match.status != MatchStatus.IN_PROGRESS or match.is_extra_time:
+            return False, "", None
+
+        # Основное время еще не закончилось?
+        if match.current_turn <= 11:
+            return False, "", None
+
+        # Рассчитываем итоговый счет
+        score1, score2, explanation = self.calculate_match_result(
+            match.player1_actions,
+            match.player2_actions
+        )
+
+        # Обновляем поля счета в матче
+        match.player1_score = score1
+        match.player2_score = score2
+
+        if score1 == score2:
+            # Ничья - переходим в ДВ
+            logger.info(f"Матч {match.id}: ничья {score1}:{score2}, требуется ДВ")
+            return False, "Ничья, требуется дополнительное время", {
+                "action": "extra_time",
+                "score1": score1,
+                "score2": score2,
+                "explanation": explanation
+            }
+        else:
+            # Есть победитель - завершаем матч
+            logger.info(f"Матч {match.id} завершен со счетом {score1}:{score2}")
+
+            winner_id = match.player1_id if score1 > score2 else match.player2_id
+            loser_id = match.player2_id if score1 > score2 else match.player1_id
+
+            return True, "Матч завершен", {
+                "action": "finish",
+                "score1": score1,
+                "score2": score2,
+                "winner_id": winner_id,
+                "loser_id": loser_id,
+                "explanation": explanation
+            }
+
+    async def process_match_completion(
+            self,
+            session: AsyncSession,
+            match: Match,
+            result_data: Dict
+    ) -> None:
+        """
+        Обрабатывает завершение матча (начисление наград, обновление статуса).
+        Вызывается только для action="finish".
+        """
+        if result_data["action"] != "finish":
+            logger.warning(f"process_match_completion вызван не для finish: {result_data['action']}")
+            return
+
+        # Обновляем статус матча
+        match.status = MatchStatus.FINISHED
+        match.finished_at = func.now()
+
+        # Здесь можно добавить начисление рейтинга
+        # Например:
+        # winner = await session.get(User, result_data["winner_id"])
+        # loser = await session.get(User, result_data["loser_id"])
+        # winner.rating += 10
+        # loser.rating += 5
+
+        await session.commit()
+
+        logger.info(f"Матч {match.id} обработан: победитель {result_data['winner_id']}")
+
+    def format_match_result(self, result_data: Dict) -> str:
+        """
+        Форматирует результат матча для отправки пользователю.
+        """
+        score1 = result_data["score1"]
+        score2 = result_data["score2"]
+        explanation = result_data.get("explanation", "")
+
+        if result_data["action"] == "finish":
+            winner_text = f"Победитель: Игрок {'1' if result_data['winner_id'] else '2'}"
+            return f"""🏆 <b>Матч завершен!</b>
+
+    Финальный счет:
+    {score1} : {score2}
+
+    {winner_text}
+
+    📊 Детали расчета:
+    {explanation}"""
+
+        elif result_data["action"] == "extra_time":
+            return f"""⏰ <b>Ничья в основное время!</b>
+
+    Счет после 11 ходов:
+    {score1} : {score2}
+
+    ⚡ Переходим к дополнительному времени!
+    Каждый игрок должен выбрать 5 запасных."""
+
+        return "Результат матча"
 
 # Глобальный экземпляр
 game_manager = GameManager()

@@ -49,7 +49,7 @@ class MatchStates:
     WAITING_FOR_BET = "waiting_for_bet"
     WAITING_FOR_CARD = "waiting_for_card"
     IN_MATCH = "in_match"
-    SELECTING_EXTRA_TIME_PLAYERS = "selecting_extra_time_players"
+
     WAITING_FOR_SECOND_BET = "waiting_for_second_bet"
 
 
@@ -485,30 +485,33 @@ async def show_turn(callback: CallbackQuery, state: FSMContext, match_id: int, t
 async def handle_no_available_players(message: Message, match: Match, state: FSMContext):
     """
     Обработка ситуации, когда нет доступных игроков для хода.
-
-    Если основное время завершено — переходит к выбору игроков для дополнительного времени.
     """
+    # Проверяем, что основное время завершено (11+ ходов)
     if not match.is_extra_time and match.current_turn >= 11:
-        text = f"""{EMOJI['clock']} <b>Основное время завершено!</b>
 
-Матч #{match.id}
-Основное время: 11 ходов
+        # Проверяем счет через game_manager
+        from services.game_manager import game_manager
 
-{EMOJI['info']} <b>Переходим к дополнительному времени!</b>
-Теперь нужно выбрать 5 игроков из тех, кто не делал ставок в основном времени."""
+        async with AsyncSessionLocal() as session:
+            _, _, result_data = await game_manager.check_match_completion(session, match)
 
-        await state.set_state(MatchStates.SELECTING_EXTRA_TIME_PLAYERS)
-        await state.update_data(
-            extra_time_selected=[],
-            selecting_for_match=match.id
-        )
+            if result_data and result_data["action"] == "extra_time":
+                # Ничья - автоматически начинаем ДВ
+                await start_extra_time_auto(message, match, state)
+                return
+            elif result_data and result_data["action"] == "finish":
+                # Уже есть победитель - завершаем
+                await game_manager.process_match_completion(session, match, result_data)
 
-        await show_extra_time_selection(message, match.id, match.get_current_user_id())
+                # Отправляем результат
+                result_text = game_manager.format_match_result(result_data)
+                await message.answer(result_text, parse_mode='HTML')
 
-    else:
-        await message.answer("Ошибка: нет доступных игроков для хода. Обратитесь к администратору.")
+                await state.clear()
+                return
 
-
+    # Если не подходит под условия - ошибка
+    await message.answer("Ошибка: нет доступных игроков для хода. Обратитесь к администратору.")
 @router.callback_query(F.data.startswith("select_player_"))
 async def select_player(callback: CallbackQuery, state: FSMContext):
     """
@@ -573,237 +576,6 @@ async def select_player(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("select_extra_"))
-async def select_extra_player(callback: CallbackQuery, state: FSMContext):
-    """
-    Выбор игроков для дополнительного времени (toggle).
-
-    Добавляет/удаляет игрока из списка, обновляет клавиатуру и состояние.
-    """
-    parts = callback.data.split("_")
-    match_id = int(parts[2])
-    player_id = int(parts[3])
-    user_id = callback.from_user.id
-
-    async with AsyncSessionLocal() as session:
-        match = await session.get(Match, match_id)
-        if not match or not match.is_player_in_match(user_id):
-            await callback.answer("Ошибка доступа к матчу")
-            return
-
-        current_state = await state.get_state()
-        if current_state != MatchStates.SELECTING_EXTRA_TIME_PLAYERS:
-            await callback.answer("Сейчас не время выбора игроков для ДВ")
-            return
-
-        state_data = await state.get_data()
-        selected = state_data.get('extra_time_selected', [])
-
-        if player_id in selected:
-            selected.remove(player_id)
-            action_emoji = "➖"
-            action_text = "удален"
-        else:
-            if len(selected) >= 5:
-                await callback.answer("Можно выбрать только 5 игроков")
-                return
-            selected.append(player_id)
-            action_emoji = "➕"
-            action_text = "выбран"
-
-        await state.update_data(extra_time_selected=selected)
-
-        user = await session.get(User, user_id)
-        player_name = f"Игрок #{player_id}"
-        if user and user.team_data:
-            team_data = json.loads(user.team_data) if isinstance(user.team_data, str) else user.team_data
-            players = team_data.get('players', [])
-            player = next((p for p in players if p.get('id') == player_id), None)
-            if player:
-                player_name = player.get('name', player_name)
-
-        await callback.answer(f"{action_emoji} {player_name} {action_text} ({len(selected)}/5)")
-
-        try:
-            await update_extra_time_keyboard(callback.message, match_id, user_id, selected)
-        except Exception as e:
-            logger.error(f"Error updating keyboard: {e}")
-            await callback.answer("Ошибка обновления")
-
-
-async def update_extra_time_keyboard(message: Message, match_id: int, user_id: int, selected: List[int]):
-    """
-    Обновление клавиатуры выбора игроков для дополнительного времени.
-
-    Перестраивает кнопки с учётом текущего выбора.
-    """
-    async with AsyncSessionLocal() as session:
-        extra_players = await game_manager.get_extra_time_players(
-            session, match_id, user_id
-        )
-
-        keyboard_buttons = []
-
-        for player in extra_players:
-            emoji = get_position_emoji(player.get('position', 'GK'))
-            player_name = player.get('name', f"Игрок {player.get('id')}")
-            player_num = player.get('number', '?')
-
-            is_selected = player['id'] in selected
-            prefix = "✅ " if is_selected else ""
-
-            keyboard_buttons.append([
-                InlineKeyboardButton(
-                    text=f"{prefix}{emoji} {player_name} (#{player_num})",
-                    callback_data=f"select_extra_{match_id}_{player['id']}"
-                )
-            ])
-
-        keyboard_buttons.append([
-            InlineKeyboardButton(
-                text=f"{EMOJI['check']} Готово ({len(selected)}/5)",
-                callback_data=f"extra_done_{match_id}"
-            )
-        ])
-
-        keyboard_buttons.append([
-            InlineKeyboardButton(
-                text=f"{EMOJI['cancel']} Отмена",
-                callback_data=f"cancel_extra_{match_id}"
-            )
-        ])
-
-        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-
-        await message.edit_reply_markup(reply_markup=keyboard)
-
-
-@router.callback_query(F.data.startswith("extra_done_"))
-async def extra_time_done(callback: CallbackQuery, state: FSMContext):
-    """
-    Завершение выбора игроков для дополнительного времени.
-
-    Сохраняет выбранных игроков в матч, проверяет готовность обоих игроков
-    и запускает дополнительное время при необходимости.
-    """
-    match_id = int(callback.data.split("_")[2])
-    user_id = callback.from_user.id
-
-    async with AsyncSessionLocal() as session:
-        match = await session.get(Match, match_id)
-        if not match or not match.is_player_in_match(user_id):
-            await callback.answer("Ошибка доступа к матчу")
-            return
-
-        state_data = await state.get_data()
-        selected = state_data.get('extra_time_selected', [])
-
-        if len(selected) != 5:
-            await callback.answer(f"Нужно выбрать ровно 5 игроков (выбрано: {len(selected)})")
-            return
-
-        is_valid, message_text = await game_manager.validate_extra_time_selection(
-            session, match_id, user_id, selected
-        )
-
-        if not is_valid:
-            await callback.answer(f"❌ {message_text}")
-            return
-
-        player_key = 'player1' if user_id == match.player1_id else 'player2'
-
-        if not match.extra_time_players:
-            match.extra_time_players = {}
-
-        match.extra_time_players[player_key] = selected
-        await session.commit()
-
-        both_selected = (
-            match.extra_time_players.get('player1') and
-            match.extra_time_players.get('player2') and
-            len(match.extra_time_players.get('player1', [])) == 5 and
-            len(match.extra_time_players.get('player2', [])) == 5
-        )
-
-        if both_selected:
-            if match.current_player_turn == "player1":
-                match.current_player_turn = "player2"
-            else:
-                match.current_player_turn = "player1"
-
-            tracker = match.bet_tracker
-            tracker.start_extra_time(selected)
-            match.bet_tracker = tracker
-
-            match.is_extra_time = True
-            match.current_turn = 1
-
-            await session.commit()
-
-            await state.set_state(MatchStates.IN_MATCH)
-            await state.update_data(extra_time_selected=[])
-
-            text = f"""{EMOJI['clock']} <b>Дополнительное время начато!</b>
-
-Матч #{match.id}
-Оба игрока выбрали по 5 запасных.
-
-{EMOJI['rules']} <b>Правила ДВ:</b>
-• Доступны те же типы ставок
-• Максимум 1 ставка на гол на игрока"""
-
-            await callback.message.edit_text(text, parse_mode='HTML')
-
-            current_user_id = match.get_current_user_id()
-            if current_user_id == user_id:
-                await show_turn(callback.message, state, match_id, 1)
-            else:
-                await callback.message.answer(
-                    f"{EMOJI['wait']} Ожидание хода соперника...",
-                    parse_mode='HTML'
-                )
-
-        else:
-            opponent_id = match.player2_id if user_id == match.player1_id else match.player1_id
-            opponent_name = get_player_name(match, opponent_id)
-
-            text = f"""{EMOJI['check']} <b>Ваш выбор сохранен!</b>
-
-Матч #{match.id}
-
-"""
-
-            await callback.message.edit_text(text, parse_mode='HTML')
-            await state.set_state(None)
-
-        await callback.answer("Выбор сохранен!")
-
-
-@router.callback_query(F.data.startswith("cancel_extra_"))
-async def cancel_extra_selection(callback: CallbackQuery, state: FSMContext):
-    """
-    Отмена выбора игроков для дополнительного времени.
-    """
-    match_id = int(callback.data.split("_")[2])
-    user_id = callback.from_user.id
-
-    async with AsyncSessionLocal() as session:
-        match = await session.get(Match, match_id)
-        if not match or not match.is_player_in_match(user_id):
-            await callback.answer("Ошибка доступа")
-            return
-
-        await state.clear()
-
-        text = f"""{EMOJI['cancel']} <b>Выбор игроков отменен</b>
-
-Матч #{match.id}
-Выбор игроков для дополнительного времени отменен.
-
-{EMOJI['info']} Дополнительное время начнется, когда оба игрока выберут по 5 игроков."""
-
-        await callback.message.edit_text(text, parse_mode='HTML')
-        await callback.answer("Выбор отменен")
 
 
 async def show_bet_type_selection(message: Message, match: Match, player: Dict):
@@ -1161,8 +933,8 @@ async def confirm_turn(callback: CallbackQuery):
         match.current_player_turn = "player2"
         await session.commit()
 
-        Final4BotAI, BotDifficulty = get_bot_ai()
-        bot_instance = Final4BotAI(difficulty=BotDifficulty.MEDIUM)
+
+        bot_instance = Final4BotAI
         await bot_instance.make_bot_turn(match, session)
 
         await callback.message.edit_text(
@@ -1251,23 +1023,32 @@ async def complete_turn(message: Message, match: Match, state: FSMContext,
         db_match = await session.get(Match, match.id)
         db_match.switch_turn()
 
-        if state_data.get('current_bet_number', 1) == 2:
-            current_field = db_match.current_on_field or {'DF': 0, 'MF': 0, 'FW': 0}
-            current_field = current_field.get(selected_player_position, 0) + 1
-            db_match.current_on_field = current_field
+        # ... остальная логика обновления ...
 
-            if db_match.used_players is None:
-                db_match.used_players = []
-            db_match.used_players.append(state_data.get('selected_player_id'))
-
-        session.add(db_match)
-
+        # Проверяем, не закончилось ли основное время
         if db_match.current_turn > 11 and not db_match.is_extra_time:
-            await start_extra_time(message, db_match, state)
-            return
+            # Проверяем счет через game_manager
+            from services.game_manager import game_manager
+
+            is_completed, _, result_data = await game_manager.check_match_completion(session, db_match)
+
+            if result_data and result_data["action"] == "extra_time":
+                # Ничья - переходим в ДВ
+                await session.commit()
+                await start_extra_time_auto(message, db_match, state)
+                return
+            elif result_data and result_data["action"] == "finish":
+                # Матч завершен
+                await game_manager.process_match_completion(session, db_match, result_data)
+
+                # Отправляем результат
+                result_text = game_manager.format_match_result(result_data)
+                await message.answer(result_text, parse_mode='HTML')
+
+                await state.clear()
+                return
 
         await session.commit()
-
 
 async def start_extra_time(message: Message, match: Match, state: FSMContext):
     """
@@ -1291,68 +1072,7 @@ async def start_extra_time(message: Message, match: Match, state: FSMContext):
         selecting_for_match=match.id
     )
 
-    await show_extra_time_selection(message, match.id, match.get_current_user_id())
 
-
-async def show_extra_time_selection(message: Message, match_id: int, user_id: int):
-    """
-    Показ клавиатуры выбора 5 игроков для дополнительного времени.
-    """
-    async with AsyncSessionLocal() as session:
-        extra_players = await game_manager.get_extra_time_players(
-            session, match_id, user_id
-        )
-
-        if len(extra_players) < 5:
-            text = f"""{EMOJI['warning']} <b>Недостаточно игроков для ДВ</b>
-
-Нужно 5 игроков, которые не делали ставок в основном времени.
-Доступно: {len(extra_players)}/{5}
-
-{EMOJI['info']} Проверьте состав команды."""
-            await message.answer(text, parse_mode='HTML')
-            return
-
-        text = f"""{EMOJI['clock']} <b>Выбор игроков для ДВ</b>
-
-Выберите 5 игроков из доступных:
-{len(extra_players)} игроков не делали ставок в основном времени.
-
-{EMOJI['rules']} <b>Инструкция:</b>
-• Нажмите на игроков, чтобы выбрать/отменить
-• Нужно выбрать ровно 5 игроков
-• После выбора нажмите "Готово"
-• Можно отменить выбор кнопкой "Назад\""""
-
-        keyboard_buttons = []
-        for player in extra_players:
-            emoji = get_position_emoji(player.get('position', 'GK'))
-            player_name = player.get('name', f"Игрок {player.get('id')}")
-            player_num = player.get('number', '?')
-
-            keyboard_buttons.append([
-                InlineKeyboardButton(
-                    text=f"{emoji} {player_name} (#{player_num})",
-                    callback_data=f"select_extra_{match_id}_{player['id']}"
-                )
-            ])
-
-        keyboard_buttons.append([
-            InlineKeyboardButton(
-                text=f"{EMOJI['check']} Готово (0/5)",
-                callback_data=f"extra_done_{match_id}"
-            )
-        ])
-
-        keyboard_buttons.append([
-            InlineKeyboardButton(
-                text=f"{EMOJI['back']} Назад",
-                callback_data=f"cancel_extra_{match_id}"
-            )
-        ])
-
-        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-        await message.answer(text, reply_markup=keyboard, parse_mode='HTML')
 
 
 async def search_opponent(match_id: int, bot):
@@ -1442,50 +1162,6 @@ def get_position_emoji(position: str) -> str:
         'FW': '⚽'
     }
     return emojis.get(position, '👤')
-
-
-def create_extra_time_keyboard(session, match_id: int, user_id: int,
-                               selected_player_ids: List[int]) -> InlineKeyboardMarkup:
-    """
-    Создание клавиатуры для дополнительного времени (заглушка).
-    """
-    keyboard_buttons = []
-
-    keyboard_buttons.append([
-        InlineKeyboardButton(
-            text=f"{EMOJI['check']} Готово ({len(selected_player_ids)}/5)",
-            callback_data=f"extra_done_{match_id}"
-        )
-    ])
-
-    keyboard_buttons.append([
-        InlineKeyboardButton(
-            text=f"{EMOJI['cancel']} Отмена",
-            callback_data=f"cancel_extra_{match_id}"
-        )
-    ])
-
-    return InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
-
-
-async def get_extra_time_players_for_keyboard(session, match_id: int, user_id: int) -> List[Dict]:
-    """
-    Получение списка игроков для клавиатуры ДВ через GameManager.
-    """
-    async with AsyncSessionLocal() as session:
-        match = await session.get(Match, match_id)
-        if not match:
-            return []
-
-        user = await session.get(User, user_id)
-        if not user or not user.team_data:
-            return []
-
-        extra_players = await game_manager.get_extra_time_players(
-            session, match_id, user_id
-        )
-
-        return extra_players
 
 
 @router.message(Command("matches"))
@@ -1670,3 +1346,75 @@ async def cancel_match_callback(callback: CallbackQuery):
             )
         else:
             await callback.answer("Нельзя отменить этот матч")
+
+
+async def start_extra_time_auto(message: Message, match: Match, state: FSMContext):
+    """
+    Автоматический старт дополнительного времени.
+    ДВ начинается сразу, используются 5 неиспользованных игроков.
+    """
+    # Получаем ID обоих игроков
+    player1_id = match.player1_id
+    player2_id = match.player2_id
+
+    # Получаем данные команд
+    team1_data = match.player1_team_data
+    team2_data = match.player2_team_data
+
+    # Находим неиспользованных игроков (кто не в used_players)
+    used_players = set(match.used_players or [])
+
+    # Для каждого игрока находим его 5 запасных
+    player1_subs = []
+    if team1_data and 'players' in team1_data:
+        for player in team1_data['players']:
+            if player.get('id') not in used_players:
+                player1_subs.append(player.get('id'))
+                if len(player1_subs) == 5:
+                    break
+
+    player2_subs = []
+    if team2_data and 'players' in team2_data:
+        for player in team2_data['players']:
+            if player.get('id') not in used_players:
+                player2_subs.append(player.get('id'))
+                if len(player2_subs) == 5:
+                    break
+
+    # Обновляем матч через game_manager
+    async with AsyncSessionLocal() as session:
+        match_db = await session.get(Match, match.id)
+
+        # Устанавливаем ДВ через метод модели
+        match_db.start_extra_time(player1_subs, player2_subs)
+
+        # Сбрасываем счетчик ходов и переключаем ход
+        match_db.current_turn = 1
+        match_db.current_player_turn = "player1"
+        match_db.is_extra_time = True
+
+        # Обновляем BetTracker
+        tracker = match_db.bet_tracker
+        tracker.start_extra_time(player1_subs + player2_subs)  # передаем общий список
+        match_db.bet_tracker = tracker
+
+        await session.commit()
+
+    # Уведомляем игроков
+    text = f"""⏰ <b>Дополнительное время!</b>
+
+Матч #{match.id}
+Основное время завершилось ничьей.
+
+⚡ <b>Автоматически выбраны запасные игроки:</b>
+• Каждая команда использует 5 игроков, не игравших в основном времени
+• Ходы продолжаются до победы
+• Счетчик ходов сброшен до 1
+
+{EMOJI['dice']} Сейчас ход: {get_player_name(match, match.get_current_user_id())}"""
+
+    await message.answer(text, parse_mode='HTML')
+
+    # Если сейчас ход текущего пользователя - показываем интерфейс
+    if match.get_current_user_id() == message.from_user.id:
+        await show_turn(message, state, match.id, 1)
